@@ -6,6 +6,171 @@ const el = (tag, text, cls) => {
   return e;
 };
 
+function makeHelpBadge(text) {
+  const badge = el('span', '?', 'help-tip');
+  badge.title = text;
+  badge.dataset.helpTitle = text;
+  badge.tabIndex = 0;
+  badge.setAttribute('aria-label', text);
+  return badge;
+}
+
+function setHelpText(node, text) {
+  if (!node || !text) return;
+  node.title = text;
+  node.dataset.helpTitle = text;
+}
+
+function addFieldHelp(label, input, text) {
+  if (!text) return;
+  if (label) {
+    setHelpText(label, text);
+    label.classList.add('field-help');
+    if (!label.querySelector('.help-tip')) {
+      label.appendChild(document.createTextNode(' '));
+      label.appendChild(makeHelpBadge(text));
+    }
+  }
+  setHelpText(input, text);
+}
+
+function addRowHelp(root, inputSelector, text) {
+  const input = root.querySelector(inputSelector);
+  if (!input) return;
+  const row = input.closest('.field-row') || input.closest('.match-row');
+  const label = row ? row.querySelector('label') : null;
+  addFieldHelp(label, input, text);
+}
+
+function restoreHelpText(node) {
+  if (!node) return;
+  node.title = node.dataset.helpTitle || '';
+}
+
+function getMatchHelp(attr) {
+  const examples = {
+    vid: 'Match USB vendor ID. Example: 0x303A',
+    pid: 'Match USB product ID. Example: 0x4001',
+    serial_number: 'Match device serial number. Example: dcda0c2004bc0000',
+    manufacturer: 'Match manufacturer with optional wildcard. Example: Espressif*',
+    product: 'Match product with optional wildcard. Example: CP210*',
+    location: 'Match USB topology location. Example: 1-1',
+  };
+  return examples[attr] || 'Match detected USB devices using an exact value or * wildcard';
+}
+
+let helpTooltipEl = null;
+let helpTooltipTarget = null;
+let helpTooltipPinned = false;
+
+function ensureHelpTooltip() {
+  if (helpTooltipEl) return helpTooltipEl;
+  helpTooltipEl = el('div', '', 'help-tooltip hidden');
+  helpTooltipEl.id = 'help-tooltip';
+  document.body.appendChild(helpTooltipEl);
+  return helpTooltipEl;
+}
+
+function getHelpText(node) {
+  if (!node) return '';
+  return node.dataset.helpTitle || node.title || '';
+}
+
+function getHelpAnchor(node) {
+  if (!node || !node.closest) return null;
+  return node.closest('.help-tip, [data-help-title], .field-help');
+}
+
+function positionHelpTooltip(target) {
+  const tooltip = ensureHelpTooltip();
+  const rect = target.getBoundingClientRect();
+  const margin = 10;
+  const top = window.scrollY + rect.bottom + 8;
+  let left = window.scrollX + rect.left;
+  tooltip.style.top = top + 'px';
+  tooltip.style.left = left + 'px';
+  const maxLeft = window.scrollX + window.innerWidth - tooltip.offsetWidth - margin;
+  if (left > maxLeft) {
+    left = Math.max(window.scrollX + margin, maxLeft);
+    tooltip.style.left = left + 'px';
+  }
+}
+
+function showHelpTooltip(target, pinned=false) {
+  const text = getHelpText(target);
+  if (!text) return;
+  const tooltip = ensureHelpTooltip();
+  helpTooltipTarget = target;
+  helpTooltipPinned = pinned;
+  tooltip.textContent = text;
+  tooltip.classList.remove('hidden');
+  positionHelpTooltip(target);
+}
+
+function hideHelpTooltip(force=false) {
+  if (helpTooltipPinned && !force) return;
+  if (!helpTooltipEl) return;
+  helpTooltipEl.classList.add('hidden');
+  helpTooltipTarget = null;
+  helpTooltipPinned = false;
+}
+
+function initHelpTooltips() {
+  ensureHelpTooltip();
+  document.addEventListener('mouseover', e => {
+    const anchor = getHelpAnchor(e.target);
+    if (!anchor) return;
+    if (helpTooltipPinned && helpTooltipTarget === anchor) return;
+    showHelpTooltip(anchor);
+  });
+  document.addEventListener('mouseout', e => {
+    const anchor = getHelpAnchor(e.target);
+    if (!anchor || helpTooltipPinned) return;
+    const next = getHelpAnchor(e.relatedTarget);
+    if (next === anchor) return;
+    hideHelpTooltip();
+  });
+  document.addEventListener('focusin', e => {
+    const anchor = getHelpAnchor(e.target);
+    if (!anchor) return;
+    showHelpTooltip(anchor);
+  });
+  document.addEventListener('focusout', e => {
+    if (helpTooltipPinned) return;
+    const next = getHelpAnchor(e.relatedTarget);
+    if (next) return;
+    hideHelpTooltip();
+  });
+  document.addEventListener('click', e => {
+    const anchor = e.target.closest('.help-tip');
+    if (anchor) {
+      e.preventDefault();
+      if (helpTooltipPinned && helpTooltipTarget === anchor) {
+        hideHelpTooltip(true);
+      } else {
+        showHelpTooltip(anchor, true);
+      }
+      return;
+    }
+    if (helpTooltipPinned) {
+      const tooltip = ensureHelpTooltip();
+      if (!tooltip.contains(e.target)) hideHelpTooltip(true);
+    }
+  });
+  window.addEventListener('scroll', () => {
+    if (helpTooltipTarget && helpTooltipEl
+        && !helpTooltipEl.classList.contains('hidden')) {
+      positionHelpTooltip(helpTooltipTarget);
+    }
+  }, true);
+  window.addEventListener('resize', () => {
+    if (helpTooltipTarget && helpTooltipEl
+        && !helpTooltipEl.classList.contains('hidden')) {
+      positionHelpTooltip(helpTooltipTarget);
+    }
+  });
+}
+
 // Theme switcher
 function applyTheme(theme) {
   if (theme === 'auto') {
@@ -72,7 +237,7 @@ let token = localStorage.getItem('ser2tcp_token');
 let username = localStorage.getItem('ser2tcp_user');
 let isAdmin = false;
 let detectedPorts = [];
-let usedPorts = [];  // [{address, port, index}] from status
+let usedPorts = [];  // [{address, port, label}] from status
 let usedEndpoints = [];  // [{endpoint, index}] from status
 
 function setCredentials(t, u) {
@@ -206,17 +371,39 @@ function loadPorts(statusData, hash) {
     detectedPorts = detected || [];
     usedPorts = [];
     usedEndpoints = [];
+    const pools = status.pools || [];
     status.ports.forEach((p, i) => {
       (p.servers || []).forEach(s => {
-        if (s.port) usedPorts.push({address: s.address, port: s.port, index: i});
+        if (s.port) usedPorts.push({
+          address: s.address,
+          port: s.port,
+          label: 'Port ' + i,
+        });
         if (s.endpoint) usedEndpoints.push({endpoint: s.endpoint, index: i});
       });
     });
+    pools.forEach((pool, i) => {
+      const address = (pool.server || {}).address || '0.0.0.0';
+      (pool.assignments || []).forEach(a => {
+        if (a.port) usedPorts.push({
+          address,
+          port: a.port,
+          label: 'Pool ' + (pool.name || i),
+        });
+      });
+    });
     root.replaceChildren();
-    if (!status.ports.length) {
-      root.appendChild(el('p', 'No ports configured', 'empty'));
+    if (status.ports.length) {
+      root.appendChild(el('h3', 'Static Ports', 'section-header'));
+      status.ports.forEach((p, i) => root.appendChild(renderPortCard(p, i)));
     }
-    status.ports.forEach((p, i) => root.appendChild(renderPortCard(p, i)));
+    if (pools.length) {
+      root.appendChild(el('h3', 'Wildcard Pools', 'section-header'));
+      pools.forEach((pool, i) => root.appendChild(renderPoolCard(pool, i)));
+    }
+    if (!status.ports.length && !pools.length) {
+      root.appendChild(el('p', 'No ports or pools configured', 'empty'));
+    }
     renderDetectedSection();
     // Open editor if hash indicates
     if (hash) {
@@ -429,6 +616,87 @@ function renderPortCard(port, index) {
   return div;
 }
 
+function renderPoolCard(pool, index) {
+  const serial = pool.serial || {};
+  const server = pool.server || {};
+  const assignments = pool.assignments || [];
+  const activeAssignments = assignments.filter(a => a.running).length;
+  const title = pool.name || serial.glob || ('Pool ' + index);
+  const div = el('div');
+  div.className = 'section';
+  div.dataset.poolIndex = index;
+  const h = el('h2');
+  const dot = el('span', '\u25cf');
+  dot.className = pool.enabled ? (activeAssignments ? 'dot-on' : 'dot-off') : 'dot-err';
+  h.appendChild(dot);
+  h.appendChild(document.createTextNode(' ' + title));
+  div.appendChild(h);
+  div.appendChild(el('p', serial.glob || '', 'pool-summary'));
+  div.appendChild(el(
+    'p',
+    'start: ' + (server.start_port || '-') + ' \u2014 matches: '
+      + (pool.matches || []).length + ' \u2014 '
+      + (pool.enabled ? 'enabled' : 'disabled'),
+    'pool-summary'));
+  const list = el('ul', null, 'assignment-list');
+  if (!assignments.length) {
+    list.appendChild(el('li', 'No assignments', 'pool-summary'));
+  }
+  assignments.forEach((assignment, assignmentIndex) => {
+    const item = document.createElement('li');
+    const main = el('div', null, 'assignment-main');
+    const label = assignment.name || basenamePath(assignment.identity);
+    const state = assignment.enabled ? 'enabled' : 'disabled';
+    const presence = assignment.present ? 'present' : 'missing';
+    const running = assignment.running ? 'running' : 'stopped';
+    const titleEl = el(
+      'div',
+      `${label} \u2014 TCP ${assignment.port}`,
+      'assignment-title');
+    main.appendChild(titleEl);
+    main.appendChild(el(
+      'div',
+      `${assignment.identity} \u2014 ${state}, ${presence}, ${running}`,
+      'assignment-meta'));
+    if (assignment.error) {
+      main.appendChild(el('div', assignment.error, 'error'));
+    }
+    item.appendChild(main);
+    const actions = el('div', null, 'assignment-actions');
+    const stateBtn = el(
+      'button',
+      assignment.enabled ? 'Stop' : 'Start',
+      assignment.enabled ? 'btn-secondary' : 'btn-primary');
+    stateBtn.onclick = () => setAssignmentState(
+      index, assignmentIndex, !assignment.enabled);
+    actions.appendChild(stateBtn);
+    const delBtn = el('button', 'Remove', 'btn-danger');
+    delBtn.onclick = () => deleteAssignment(index, assignmentIndex);
+    actions.appendChild(delBtn);
+    item.appendChild(actions);
+    list.appendChild(item);
+  });
+  div.appendChild(list);
+  const poolActions = el('div', null, 'pool-inline-actions');
+  const stateBtn = el(
+    'button',
+    pool.enabled ? 'Stop Pool' : 'Start Pool',
+    pool.enabled ? 'btn-secondary' : 'btn-primary');
+  stateBtn.onclick = () => setPoolState(index, !pool.enabled);
+  poolActions.appendChild(stateBtn);
+  const addBtn = el('button', '+ Add Assignment', 'btn-secondary');
+  addBtn.onclick = () => addAssignment(index);
+  poolActions.appendChild(addBtn);
+  div.appendChild(poolActions);
+  const editBtn = document.createElement('button');
+  editBtn.className = 'btn-edit';
+  editBtn.innerHTML = '&#9998;';
+  editBtn.title = 'Edit';
+  editBtn.onclick = () => showPoolEditor(index, buildPoolConfigFromStatus(pool));
+  div.appendChild(editBtn);
+  return div;
+}
+
 function renderDetectedSection() {
   const root = $('detected-ports');
   root.replaceChildren();
@@ -495,6 +763,11 @@ function nextFreePort(start) {
   return p;
 }
 
+function basenamePath(path) {
+  const parts = (path || '').split('/');
+  return parts[parts.length - 1] || path;
+}
+
 function addPortFromDetected(detected, matchAttr) {
   const config = {
     serial: {port: detected.device},
@@ -513,6 +786,15 @@ function addPort() {
     servers: [{protocol: 'tcp', address: '0.0.0.0', port: nextFreePort()}],
   };
   showPortEditor(null, config);
+}
+
+function addPool() {
+  showPoolEditor(null, {
+    name: '',
+    enabled: true,
+    serial: {glob: ''},
+    server: {address: '0.0.0.0', start_port: nextFreePort(11000)},
+  });
 }
 
 function buildConfigFromStatus(port) {
@@ -549,6 +831,15 @@ function buildConfigFromStatus(port) {
   return config;
 }
 
+function buildPoolConfigFromStatus(pool) {
+  return {
+    name: pool.name || '',
+    enabled: pool.enabled !== false,
+    serial: {...(pool.serial || {})},
+    server: {...(pool.server || {})},
+  };
+}
+
 function showPortEditor(index, config, skipHistory) {
   const root = $('ports-content');
   // Find existing card or append
@@ -575,13 +866,16 @@ function showPortEditor(index, config, skipHistory) {
 
   // Name field
   const nameRow = el('div', null, 'field-row');
-  nameRow.appendChild(el('label', 'Name:'));
+  const nameLabel = el('label', 'Name:');
+  nameRow.appendChild(nameLabel);
   const nameInput = document.createElement('input');
   nameInput.type = 'text';
   nameInput.id = 'edit-name';
   nameInput.placeholder = '';
   nameInput.value = config.name || '';
   nameRow.appendChild(nameInput);
+  addFieldHelp(nameLabel, nameInput,
+    'Optional display label shown in the UI. Example: lab-console');
   container.appendChild(nameRow);
 
   // --- Serial section ---
@@ -589,7 +883,8 @@ function showPortEditor(index, config, skipHistory) {
 
   // Port field with datalist
   const portRow = el('div', null, 'field-row');
-  portRow.appendChild(el('label', 'Port:'));
+  const portLabel = el('label', 'Port:');
+  portRow.appendChild(portLabel);
   const portInput = document.createElement('input');
   portInput.type = 'text';
   portInput.id = 'edit-port';
@@ -597,6 +892,8 @@ function showPortEditor(index, config, skipHistory) {
   portInput.value = config.serial.port || '';
   portInput.oninput = () => fillMatchFromPort(portInput.value);
   portRow.appendChild(portInput);
+  addFieldHelp(portLabel, portInput,
+    'Serial device path. Examples: /dev/ttyUSB0 or /dev/cu.usbmodem141401');
   container.appendChild(portRow);
 
   // Datalist for port
@@ -624,7 +921,8 @@ function showPortEditor(index, config, skipHistory) {
     const detectedVal = getDetectedAttr(config.serial.port, attr);
     cb.checked = !!matchVal;
     row.appendChild(cb);
-    row.appendChild(el('label', attr + ':'));
+    const label = el('label', attr + ':');
+    row.appendChild(label);
     const input = document.createElement('input');
     input.type = 'text';
     input.dataset.matchAttr = attr;
@@ -633,6 +931,9 @@ function showPortEditor(index, config, skipHistory) {
     input.disabled = !cb.checked;
     input.setAttribute('list', 'match-list-' + attr);
     row.appendChild(input);
+    const matchHelp = getMatchHelp(attr);
+    addFieldHelp(label, input, matchHelp);
+    setHelpText(cb, matchHelp);
     // Datalist for this attribute
     const dl = document.createElement('datalist');
     dl.id = 'match-list-' + attr;
@@ -682,6 +983,8 @@ function showPortEditor(index, config, skipHistory) {
     baudSel.appendChild(opt);
   });
   paramsDiv.appendChild(baudSel);
+  addFieldHelp(paramsDiv.querySelector('label'), baudSel,
+    'Serial speed. Example: 115200');
   container.appendChild(paramsDiv);
 
   const byteRow = el('div', null, 'field-row');
@@ -697,6 +1000,8 @@ function showPortEditor(index, config, skipHistory) {
     byteSel.appendChild(opt);
   });
   byteRow.appendChild(byteSel);
+  addFieldHelp(byteRow.querySelector('label'), byteSel,
+    'Number of data bits per character. Example: 8');
   container.appendChild(byteRow);
 
   const parityRow = el('div', null, 'field-row');
@@ -711,6 +1016,8 @@ function showPortEditor(index, config, skipHistory) {
     paritySel.appendChild(opt);
   });
   parityRow.appendChild(paritySel);
+  addFieldHelp(parityRow.querySelector('label'), paritySel,
+    'Serial parity mode. Example: NONE');
   container.appendChild(parityRow);
 
   const stopRow = el('div', null, 'field-row');
@@ -726,6 +1033,8 @@ function showPortEditor(index, config, skipHistory) {
     stopSel.appendChild(opt);
   });
   stopRow.appendChild(stopSel);
+  addFieldHelp(stopRow.querySelector('label'), stopSel,
+    'Serial stop bits. Example: ONE');
   container.appendChild(stopRow);
 
   // Port-level max connections
@@ -739,8 +1048,9 @@ function showPortEditor(index, config, skipHistory) {
   portMaxInput.inputMode = 'numeric';
   portMaxInput.placeholder = '0 (unlimited)';
   portMaxInput.value = config.max_connections !== undefined ? config.max_connections : '';
-  portMaxInput.title = 'Total clients across all servers on this port (0 = unlimited)';
   portMaxRow.appendChild(portMaxInput);
+  addFieldHelp(portMaxRow.querySelector('label'), portMaxInput,
+    'Total clients across all servers on this serial port. Example: 0 for unlimited or 4');
   container.appendChild(portMaxRow);
 
   // --- Servers section ---
@@ -776,6 +1086,130 @@ function showPortEditor(index, config, skipHistory) {
 
   updateMatchMode();
   updateMatchPreview();
+}
+
+function showPoolEditor(index, config) {
+  const root = $('ports-content');
+  const container = document.createElement('div');
+  container.className = 'pool-edit';
+  container.dataset.poolIndex = index !== null ? index : 'new';
+  container.innerHTML = `
+    <h3>${index !== null ? 'Edit Pool' : 'New Pool'}</h3>
+    <div class="field-row">
+      <label>Name:</label>
+      <input type="text" id="pool-name" value="${config.name || ''}">
+    </div>
+    <div class="field-row">
+      <label><input type="checkbox" id="pool-enabled" ${config.enabled !== false ? 'checked' : ''}> Enabled</label>
+    </div>
+    <h3>Serial</h3>
+    <div class="field-row">
+      <label>Glob:</label>
+      <input type="text" id="pool-glob" value="${config.serial?.glob || ''}" placeholder="/dev/serial/by-id/usb-*">
+    </div>
+    <div class="field-row">
+      <label>Baudrate:</label>
+      <input type="number" id="pool-baudrate" value="${config.serial?.baudrate || ''}" placeholder="optional">
+    </div>
+    <div class="field-row">
+      <label>Data bits:</label>
+      <select id="pool-bytesize">
+        <option value="">(default)</option>
+      </select>
+    </div>
+    <div class="field-row">
+      <label>Parity:</label>
+      <select id="pool-parity">
+        <option value="">(default)</option>
+      </select>
+    </div>
+    <div class="field-row">
+      <label>Stop bits:</label>
+      <select id="pool-stopbits">
+        <option value="">(default)</option>
+      </select>
+    </div>
+    <h3>TCP Server</h3>
+    <div class="field-row">
+      <label>Address:</label>
+      <input type="text" id="pool-address" value="${config.server?.address || '0.0.0.0'}">
+    </div>
+    <div class="field-row">
+      <label>Start port:</label>
+      <input type="number" id="pool-start-port" value="${config.server?.start_port || ''}" min="1" max="65535">
+    </div>
+    <div class="field-row">
+      <label>Send timeout:</label>
+      <input type="number" id="pool-send-timeout" value="${config.server?.send_timeout || ''}" step="0.1" placeholder="optional">
+    </div>
+    <div class="field-row">
+      <label>Buffer limit:</label>
+      <input type="number" id="pool-buffer-limit" value="${config.server?.buffer_limit ?? ''}" min="0" placeholder="optional">
+    </div>
+    <div class="field-row">
+      <label>Max clients:</label>
+      <input type="number" id="pool-max-connections" value="${config.server?.max_connections ?? ''}" min="0" placeholder="optional">
+    </div>
+    <div class="edit-buttons">
+      <button type="button" class="btn-primary" id="pool-save-btn">Save</button>
+      ${index !== null ? '<button type="button" class="btn-danger" id="pool-delete-btn">Delete</button>' : ''}
+      <button type="button" id="pool-cancel-btn">Cancel</button>
+    </div>
+  `;
+  const bytesizeSel = container.querySelector('#pool-bytesize');
+  Object.entries(BYTESIZES).forEach(([bits, name]) => {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = bits;
+    if (config.serial?.bytesize === name) opt.selected = true;
+    bytesizeSel.appendChild(opt);
+  });
+  const paritySel = container.querySelector('#pool-parity');
+  PARITIES.forEach(parity => {
+    const opt = document.createElement('option');
+    opt.value = parity;
+    opt.textContent = parity;
+    if (config.serial?.parity === parity) opt.selected = true;
+    paritySel.appendChild(opt);
+  });
+  const stopbitsSel = container.querySelector('#pool-stopbits');
+  Object.entries(STOPBITS).forEach(([bits, name]) => {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = bits;
+    if (config.serial?.stopbits === name) opt.selected = true;
+    stopbitsSel.appendChild(opt);
+  });
+  root.prepend(container);
+  addRowHelp(container, '#pool-name',
+    'Optional pool label shown in the UI. Example: Lab USB adapters');
+  addRowHelp(container, '#pool-enabled',
+    'Start or stop automatic discovery for this pool');
+  addRowHelp(container, '#pool-glob',
+    'Filesystem glob used to discover device identities. Example: /dev/serial/by-id/usb-*');
+  addRowHelp(container, '#pool-baudrate',
+    'Serial speed for all matched devices. Example: 115200');
+  addRowHelp(container, '#pool-bytesize',
+    'Number of data bits per character. Example: 8');
+  addRowHelp(container, '#pool-parity',
+    'Serial parity mode. Example: NONE');
+  addRowHelp(container, '#pool-stopbits',
+    'Serial stop bits. Example: ONE');
+  addRowHelp(container, '#pool-address',
+    'Bind address for all auto-assigned TCP listeners. Example: 0.0.0.0');
+  addRowHelp(container, '#pool-start-port',
+    'First TCP port used for auto-assignment. Example: 11000');
+  addRowHelp(container, '#pool-send-timeout',
+    'Disconnect clients if buffered data cannot be sent within this many seconds. Example: 5.0');
+  addRowHelp(container, '#pool-buffer-limit',
+    'Per-client send buffer limit in bytes. Example: 65536 or leave empty for default');
+  addRowHelp(container, '#pool-max-connections',
+    'Per-assignment client limit. Example: 0 for unlimited or 2');
+  container.querySelector('#pool-save-btn').onclick = () => savePool(index);
+  container.querySelector('#pool-cancel-btn').onclick = () => loadPorts();
+  if (index !== null) {
+    container.querySelector('#pool-delete-btn').onclick = () => deletePool(index);
+  }
 }
 
 function getDetectedAttr(port, attr) {
@@ -855,6 +1289,8 @@ function renderServerBox(srv, index, total) {
   });
   protoRow.appendChild(protoSel);
   box.appendChild(protoRow);
+  addFieldHelp(protoRow.querySelector('label'), protoSel,
+    'Client protocol. Example: TCP for raw sockets, WebSocket for browser access');
 
   // WebSocket fields
   const wsDiv = el('div');
@@ -868,6 +1304,8 @@ function renderServerBox(srv, index, total) {
   wsEndpoint.value = srv.endpoint || '';
   wsRow1.appendChild(wsEndpoint);
   wsDiv.appendChild(wsRow1);
+  addFieldHelp(wsRow1.querySelector('label'), wsEndpoint,
+    'WebSocket path under /ws/. Example: my-device');
   const wsRow2 = el('div', null, 'field-row');
   wsRow2.appendChild(el('label', 'Token:'));
   const wsToken = document.createElement('input');
@@ -877,6 +1315,8 @@ function renderServerBox(srv, index, total) {
   wsToken.value = srv.token || '';
   wsRow2.appendChild(wsToken);
   wsDiv.appendChild(wsRow2);
+  addFieldHelp(wsRow2.querySelector('label'), wsToken,
+    'Optional per-endpoint token. Leave empty to use global auth');
   box.appendChild(wsDiv);
 
   // Address + Port (or Path for SOCKET)
@@ -889,6 +1329,8 @@ function renderServerBox(srv, index, total) {
   addrInput.value = srv.address || '0.0.0.0';
   addrRow.appendChild(addrInput);
   box.appendChild(addrRow);
+  addFieldHelp(addrLabel, addrInput,
+    'Bind address or socket path. Examples: 0.0.0.0, 127.0.0.1, /tmp/ser2tcp.sock');
   const portRow = el('div', null, 'field-row');
   const portLabel = el('label', 'Port:');
   portLabel.className = 'srv-port-label';
@@ -899,6 +1341,8 @@ function renderServerBox(srv, index, total) {
   portInput.value = srv.port || '';
   portRow.appendChild(portInput);
   box.appendChild(portRow);
+  addFieldHelp(portLabel, portInput,
+    'TCP port to listen on. Example: 10001');
 
   // SSL fields
   const sslDiv = el('div');
@@ -916,6 +1360,12 @@ function renderServerBox(srv, index, total) {
     inp.value = val || '';
     row.appendChild(inp);
     sslDiv.appendChild(row);
+    const sslHelp = cls === 'srv-certfile'
+      ? 'Path to the server certificate file. Example: /etc/ser2tcp/server.crt'
+      : cls === 'srv-keyfile'
+        ? 'Path to the server private key file. Example: /etc/ser2tcp/server.key'
+        : 'Optional CA certificate bundle for client verification. Example: /etc/ser2tcp/ca.crt';
+    addFieldHelp(row.querySelector('label'), inp, sslHelp);
   });
   box.appendChild(sslDiv);
 
@@ -935,6 +1385,8 @@ function renderServerBox(srv, index, total) {
   ctlEnableLbl.appendChild(document.createTextNode(' Control protocol'));
   ctlEnableRow.appendChild(ctlEnableLbl);
   ctlDiv.appendChild(ctlEnableRow);
+  addFieldHelp(ctlEnableLbl, ctlEnableCb,
+    'Enable signal control and status reporting for this server');
   // Control details (shown when enabled)
   const ctlDetails = el('div');
   ctlDetails.className = 'ctl-details';
@@ -950,6 +1402,8 @@ function renderServerBox(srv, index, total) {
   ctlDataLbl.appendChild(document.createTextNode(' Forward serial data'));
   ctlDataRow.appendChild(ctlDataLbl);
   ctlDetails.appendChild(ctlDataRow);
+  addFieldHelp(ctlDataLbl, ctlDataCb,
+    'Disable this for control-only clients that should not receive serial data');
   // Protocol description (changes based on protocol)
   const ctlDesc = el('p', '', 'ctl-desc');
   const ctlMoreBtn = el('a', 'Protocol reference');
@@ -1010,6 +1464,8 @@ function renderServerBox(srv, index, total) {
   });
   pollRow.appendChild(pollSel);
   ctlDetails.appendChild(pollRow);
+  addFieldHelp(pollRow.querySelector('label'), pollSel,
+    'How often signal inputs are sampled. Example: 100 ms');
   ctlDiv.appendChild(ctlDetails);
   const updateCtlVisibility = () => {
     ctlDetails.classList.toggle('hidden', !ctlEnableCb.checked);
@@ -1030,6 +1486,8 @@ function renderServerBox(srv, index, total) {
   ipAllowInput.value = (srv.allow || []).join(', ');
   ipAllowRow.appendChild(ipAllowInput);
   ipDiv.appendChild(ipAllowRow);
+  addFieldHelp(ipAllowRow.querySelector('label'), ipAllowInput,
+    'Comma-separated allow list. Example: 192.168.1.0/24, 10.0.0.5');
   const ipDenyRow = el('div', null, 'field-row');
   ipDenyRow.appendChild(el('label', 'Deny IPs:'));
   const ipDenyInput = document.createElement('input');
@@ -1039,6 +1497,8 @@ function renderServerBox(srv, index, total) {
   ipDenyInput.value = (srv.deny || []).join(', ');
   ipDenyRow.appendChild(ipDenyInput);
   ipDiv.appendChild(ipDenyRow);
+  addFieldHelp(ipDenyRow.querySelector('label'), ipDenyInput,
+    'Comma-separated deny list. Example: 192.168.1.100');
   box.appendChild(ipDiv);
 
   // Max connections
@@ -1052,9 +1512,22 @@ function renderServerBox(srv, index, total) {
   maxConnInput.inputMode = 'numeric';
   maxConnInput.placeholder = '0';
   maxConnInput.value = srv.max_connections !== undefined ? srv.max_connections : '';
-  maxConnInput.title = '0 = unlimited, default is 5';
   maxConnRow.appendChild(maxConnInput);
   box.appendChild(maxConnRow);
+  addFieldHelp(maxConnRow.querySelector('label'), maxConnInput,
+    'Client limit for this server only. Example: 0 for unlimited or 2');
+  setHelpText(ctlWriteRow.querySelector('label'),
+    'Allow connected clients to change RTS or DTR');
+  ctlWriteRow.querySelectorAll('.ctl-write').forEach(cb => {
+    setHelpText(cb,
+      'Allow clients to set ' + cb.dataset.signal.toUpperCase());
+  });
+  setHelpText(ctlSigRow.querySelector('label'),
+    'Choose which serial signals are reported back to clients');
+  ctlSigRow.querySelectorAll('.ctl-signal').forEach(cb => {
+    setHelpText(cb,
+      'Report ' + cb.dataset.signal.toUpperCase() + ' state to clients');
+  });
 
   // Update visibility based on protocol
   const updateProtoFields = () => {
@@ -1109,25 +1582,26 @@ function renderServerBox(srv, index, total) {
       wsEndpoint.style.borderColor = epErr ? '#e55' : '';
       wsEndpoint.title = epConflict
         ? 'Endpoint used by Port ' + epConflict.index
-        : editorDup ? 'Duplicate endpoint' : '';
+        : editorDup ? 'Duplicate endpoint' : (wsEndpoint.dataset.helpTitle || '');
     } else {
       wsEndpoint.style.borderColor = '';
-      wsEndpoint.title = '';
+      restoreHelpText(wsEndpoint);
     }
     // Port conflict check
     if (proto === 'SOCKET' || proto === 'WEBSOCKET') {
       portInput.style.borderColor = '';
-      portInput.title = '';
+      restoreHelpText(portInput);
       return;
     }
     const addr = addrInput.value.trim();
     const p = parseInt(portInput.value);
     if (!p) { portInput.style.borderColor = ''; return; }
     const conflict = usedPorts.find(u =>
-      u.port === p && u.address === addr && u.index !== editIndex);
+      u.port === p && u.address === addr && u.label !== ('Port ' + editIndex));
     portInput.style.borderColor = conflict ? '#e55' : '';
     portInput.title = conflict
-      ? 'Port already used by Port ' + conflict.index : '';
+      ? 'Port already used by ' + conflict.label
+      : (portInput.dataset.helpTitle || '');
   };
   portInput.oninput = checkConflict;
   addrInput.oninput = checkConflict;
@@ -1280,6 +1754,82 @@ function savePort(index) {
   });
 }
 
+function collectPoolConfig() {
+  const config = {
+    enabled: $('pool-enabled').checked,
+    serial: {glob: $('pool-glob').value.trim()},
+    server: {
+      address: $('pool-address').value.trim() || '0.0.0.0',
+      start_port: parseInt($('pool-start-port').value, 10),
+    },
+  };
+  const name = $('pool-name').value.trim();
+  if (name) config.name = name;
+  const baudrate = $('pool-baudrate').value.trim();
+  if (baudrate) config.serial.baudrate = parseInt(baudrate, 10);
+  const bytesize = $('pool-bytesize').value;
+  if (bytesize) config.serial.bytesize = bytesize;
+  const parity = $('pool-parity').value;
+  if (parity) config.serial.parity = parity;
+  const stopbits = $('pool-stopbits').value;
+  if (stopbits) config.serial.stopbits = stopbits;
+  const sendTimeout = $('pool-send-timeout').value.trim();
+  if (sendTimeout) config.server.send_timeout = parseFloat(sendTimeout);
+  const bufferLimit = $('pool-buffer-limit').value.trim();
+  if (bufferLimit !== '') config.server.buffer_limit = parseInt(bufferLimit, 10);
+  const maxConnections = $('pool-max-connections').value.trim();
+  if (maxConnections !== '') {
+    config.server.max_connections = parseInt(maxConnections, 10);
+  }
+  return config;
+}
+
+function savePool(index) {
+  const config = collectPoolConfig();
+  const method = index !== null ? 'PUT' : 'POST';
+  const path = index !== null ? '/api/pools/' + index : '/api/pools';
+  api(method, path, config).then(() => loadPorts())
+    .catch(e => { if (e !== 'unauthorized') alert(e); });
+}
+
+function deletePool(index) {
+  if (!confirm('Delete pool ' + index + '?')) return;
+  api('DELETE', '/api/pools/' + index).then(() => loadPorts())
+    .catch(e => { if (e !== 'unauthorized') alert(e); });
+}
+
+function setPoolState(index, enabled) {
+  api('PUT', '/api/pools/' + index + '/state', {enabled}).then(() => loadPorts())
+    .catch(e => { if (e !== 'unauthorized') alert(e); });
+}
+
+function addAssignment(poolIndex) {
+  const identity = prompt('Assignment identity path:');
+  if (!identity) return;
+  const name = prompt('Assignment name (optional):', '') || '';
+  api('POST', '/api/pools/' + poolIndex + '/assignments', {
+    identity: identity.trim(),
+    name: name.trim() || undefined,
+  }).then(() => loadPorts())
+    .catch(e => { if (e !== 'unauthorized') alert(e); });
+}
+
+function setAssignmentState(poolIndex, assignmentIndex, enabled) {
+  api(
+    'PUT',
+    '/api/pools/' + poolIndex + '/assignments/' + assignmentIndex + '/state',
+    {enabled}
+  ).then(() => loadPorts())
+    .catch(e => { if (e !== 'unauthorized') alert(e); });
+}
+
+function deleteAssignment(poolIndex, assignmentIndex) {
+  if (!confirm('Remove this assignment?')) return;
+  api('DELETE', '/api/pools/' + poolIndex + '/assignments/' + assignmentIndex)
+    .then(() => loadPorts())
+    .catch(e => { if (e !== 'unauthorized') alert(e); });
+}
+
 function disconnectClient(portIdx, srvIdx, conIdx) {
   api('DELETE', '/api/ports/' + portIdx + '/connections/' + srvIdx + '/' + conIdx)
     .then(() => loadPorts())
@@ -1403,6 +1953,14 @@ function showUserEditor(login, user) {
       <button type="button" class="user-cancel-btn">Cancel</button>
     </div>
   `;
+  addRowHelp(card, '.user-login',
+    'Unique login name for web UI access. Example: admin');
+  addRowHelp(card, '.user-password',
+    isNew
+      ? 'Password for this user. Example: a long unique passphrase'
+      : 'Set a new password for this user, or leave empty to keep the current one');
+  addRowHelp(card, '.user-admin',
+    'Grant full administrative access to settings, ports, pools, users, and tokens');
   card.querySelector('.user-save-btn').addEventListener('click', () => saveUser(isNew ? null : login, card));
   card.querySelector('.user-cancel-btn').addEventListener('click', () => loadUsers());
   if (!isNew) {
@@ -1447,6 +2005,12 @@ function showTokenEditor(tokenId, tok) {
       <button type="button" class="token-cancel-btn">Cancel</button>
     </div>
   `;
+  addRowHelp(card, '.token-name',
+    'Display name for this API token. Example: monitoring-bot');
+  addRowHelp(card, '.token-value-input',
+    'Bearer token value used for API access. Example: a generated 64-character hex token');
+  addRowHelp(card, '.token-admin',
+    'Grant this token full administrative API access');
   card.querySelector('.token-generate-btn').addEventListener('click', () => {
     card.querySelector('.token-value-input').value = generateToken();
   });
@@ -1643,6 +2207,8 @@ function showSessionEditor() {
       <button type="button" id="cancel-session-btn">Cancel</button>
     </div>
   `;
+  addRowHelp(card, '#edit-session-timeout',
+    'Default session lifetime in seconds. Example: 3600. Leave empty to use the built-in default');
   existing.replaceWith(card);
   card.querySelector('#save-session-btn').addEventListener('click', () => {
     const val = $('edit-session-timeout').value;
@@ -1703,6 +2269,18 @@ function showHttpEditor(index, srv) {
       <button type="button" class="http-cancel-btn">Cancel</button>
     </div>
   `;
+  addRowHelp(card, '.http-name',
+    'Optional label shown in the Settings view. Example: main');
+  addRowHelp(card, '.http-address',
+    'HTTP bind address. Example: 127.0.0.1 or 0.0.0.0');
+  addRowHelp(card, '.http-port',
+    'HTTP listen port. Example: 8080');
+  addRowHelp(card, '.http-ssl',
+    'Enable HTTPS for this listener');
+  addRowHelp(card, '.http-certfile',
+    'Path to the TLS certificate file. Example: /etc/ser2tcp/server.crt');
+  addRowHelp(card, '.http-keyfile',
+    'Path to the TLS private key file. Example: /etc/ser2tcp/server.key');
   card.querySelector('.http-ssl').addEventListener('change', e => {
     card.querySelector('.ssl-fields').classList.toggle('hidden', !e.target.checked);
   });
@@ -1754,6 +2332,7 @@ function addHttpServer() {
 // --- Init ---
 function init() {
   initTheme();
+  initHelpTooltips();
   $('login-btn').addEventListener('click', doLogin);
   $('login-pass').addEventListener('keydown',
     e => { if (e.key === 'Enter') doLogin(); });
@@ -1761,6 +2340,7 @@ function init() {
   $('add-user-btn').addEventListener('click', addUser);
   $('add-token-btn').addEventListener('click', addToken);
   $('add-port-btn').addEventListener('click', addPort);
+  $('add-pool-btn').addEventListener('click', addPool);
   $('add-http-btn').addEventListener('click', addHttpServer);
 
   document.querySelectorAll('nav button[data-tab]').forEach(btn => {

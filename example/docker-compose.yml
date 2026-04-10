@@ -1,0 +1,13 @@
+services:
+  ser2tcp:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: ser2tcp
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - /dev:/dev
+    command: ["-v", "-c", "/config/config.yaml"]

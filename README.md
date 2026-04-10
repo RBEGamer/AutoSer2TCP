@@ -38,11 +38,74 @@ or from source:
 pip install .
 ```
 
+or install the runtime dependencies directly:
+
+```
+pip install -r requirements.txt
+```
+
+For development:
+
+```
+pip install -e .
+```
+
+### Build from source
+
+`ser2tcp` is packaged with `pyproject.toml`.
+
+Build source and wheel distributions:
+
+```bash
+python -m pip install --upgrade build
+python -m build
+```
+
+Build artifacts are written to `dist/`.
+
+Install the built wheel locally:
+
+```bash
+python -m pip install dist/ser2tcp-*.whl
+```
+
+### Docker build
+
+Build the container image from the repository root:
+
+```bash
+docker build -t ser2tcp .
+```
+
+Run it with a mounted config file:
+
+```bash
+docker run --rm \
+  --network host \
+  --privileged \
+  -v /dev:/dev \
+  -v $(pwd)/ser2tcp.yaml:/config/config.yaml:ro \
+  ser2tcp
+```
+
+For a Linux-focused Compose example, see [example/README.md](/Users/marcelochsendorf/Downloads/AutoSer2TCP/example/README.md).
+
 ### Uninstall
 
 ```
 pip uninstall ser2tcp
 ```
+
+## Quick start
+
+1. Install `ser2tcp`.
+2. Start it once:
+   ```bash
+   ser2tcp -v
+   ```
+3. If `~/.config/ser2tcp/config.yaml` does not exist yet, `ser2tcp` creates it automatically and starts an HTTP admin server on the first free port from `20080`.
+4. Open the web UI on the configured HTTP address, or edit the YAML file directly and add `ports` or `pools`.
+5. Restart `ser2tcp` after changing the config file manually.
 
 ## Command line options
 
@@ -54,7 +117,7 @@ pip uninstall ser2tcp
   --hash-password PASSWORD
                         Hash password for config file and exit
   -c CONFIG, --config CONFIG
-                        configuration in JSON format (default: ~/.config/ser2tcp/config.json)
+                        configuration in YAML format (default: ~/.config/ser2tcp/config.yaml)
 ```
 
 If no config file is specified and default config doesn't exist, creates one with HTTP server on first free port from 20080.
@@ -67,36 +130,28 @@ If no config file is specified and default config doesn't exist, creates one wit
 
 ## Configuration file example
 
-```json
-{
-    "ports": [
-        {
-            "serial": {
-                "port": "/dev/ttyUSB0",
-                "baudrate": 115200,
-                "parity": "NONE",
-                "stopbits": "ONE"
-            },
-            "servers": [
-                {
-                    "address": "127.0.0.1",
-                    "port": 10001,
-                    "protocol": "tcp"
-                },
-                {
-                    "address": "0.0.0.0",
-                    "port": 10002,
-                    "protocol": "telnet",
-                    "send_timeout": 5.0,
-                    "buffer_limit": 65536
-                }
-            ]
-        }
-    ]
-}
+```yaml
+ports:
+  - serial:
+      port: /dev/ttyUSB0
+      baudrate: 115200
+      parity: NONE
+      stopbits: ONE
+    servers:
+      - address: 127.0.0.1
+        port: 10001
+        protocol: tcp
+      - address: 0.0.0.0
+        port: 10002
+        protocol: telnet
+        send_timeout: 5.0
+        buffer_limit: 65536
 ```
 
-Legacy format (JSON array at root level) is still supported for backward compatibility.
+JSON configuration files are no longer supported. Use `.yaml` or `.yml`.
+
+On macOS, serial adapters usually appear as `/dev/cu.usbserial-*` or
+`/dev/cu.usbmodem*`. Use `ser2tcp --usb` to see the exact device path.
 
 ### Serial configuration
 
@@ -106,17 +161,13 @@ Legacy format (JSON array at root level) is still supported for backward compati
 
 Instead of specifying `port` directly, you can use `match` to find device by USB attributes:
 
-```json
-{
-    "serial": {
-        "match": {
-            "vid": "0x303A",
-            "pid": "0x4001",
-            "serial_number": "dcda0c2004bc0000"
-        },
-        "baudrate": 115200
-    }
-}
+```yaml
+serial:
+  match:
+    vid: "0x303A"
+    pid: "0x4001"
+    serial_number: dcda0c2004bc0000
+  baudrate: 115200
 ```
 
 Use `ser2tcp --usb` to list available USB devices with their attributes:
@@ -135,6 +186,39 @@ $ ser2tcp --usb
 Match attributes: `vid`, `pid`, `serial_number`, `manufacturer`, `product`, `location`, `description`, `hwid`
 
 - Wildcard `*` supported (e.g. `"product": "CP210*"`)
+
+#### Wildcard serial pools
+
+Use `pools` to discover devices from a filesystem glob and auto-assign TCP
+ports starting at `start_port`. When the same identity reappears, it keeps the
+same assigned TCP port.
+
+```yaml
+pools:
+  - name: USB adapters
+    enabled: true
+    serial:
+      glob: /dev/serial/by-id/usb-*
+      baudrate: 115200
+    server:
+      address: 0.0.0.0
+      start_port: 11000
+      send_timeout: 5.0
+      buffer_limit: 65536
+      max_connections: 2
+    assignments:
+      - identity: /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A50285BI-if00-port0
+        port: 11000
+        enabled: true
+        name: console-a
+    ignored_identities: []
+```
+
+- Pools are TCP-only.
+- Discovery is based on filesystem globbing, for example `/dev/serial/by-id/usb-*`.
+- New devices are assigned the next free TCP port starting from `start_port`.
+- Removing an assignment from the web UI stores its identity in `ignored_identities`
+  so it is not recreated automatically on the next scan.
 - Matching is case-insensitive
 - Error if multiple devices match the criteria
 - Device is resolved when client connects, not at startup (device does not need to exist at startup)
@@ -162,17 +246,18 @@ Match attributes: `vid`, `pid`, `serial_number`, `manufacturer`, `product`, `loc
 
 You can also limit total connections across all servers on a port:
 
-```json
-{
-    "ports": [{
-        "max_connections": 10,
-        "serial": {"port": "/dev/ttyUSB0"},
-        "servers": [
-            {"protocol": "tcp", "address": "0.0.0.0", "port": 10001, "max_connections": 5},
-            {"protocol": "websocket", "endpoint": "device"}
-        ]
-    }]
-}
+```yaml
+ports:
+  - max_connections: 10
+    serial:
+      port: /dev/ttyUSB0
+    servers:
+      - protocol: tcp
+        address: 0.0.0.0
+        port: 10001
+        max_connections: 5
+      - protocol: websocket
+        endpoint: device
 ```
 
 - Port-level `max_connections`: limits total clients across all servers (default 0 = unlimited)
@@ -183,15 +268,12 @@ You can also limit total connections across all servers on a port:
 
 WebSocket connections go through the HTTP server — no separate listening port needed:
 
-```json
-{
-    "protocol": "websocket",
-    "endpoint": "my-device",
-    "control": {
-        "rts": true,
-        "signals": ["rts", "dtr", "cts", "dsr"]
-    }
-}
+```yaml
+protocol: websocket
+endpoint: my-device
+control:
+  rts: true
+  signals: [rts, dtr, cts, dsr]
 ```
 
 - Accessible at `ws://host:port/ws/my-device` (or `wss://` for HTTPS)
@@ -206,11 +288,9 @@ WebSocket connections go through the HTTP server — no separate listening port 
 
 For `socket` protocol, `address` is the path to the Unix domain socket:
 
-```json
-{
-    "address": "/tmp/ser2tcp.sock",
-    "protocol": "socket"
-}
+```yaml
+address: /tmp/ser2tcp.sock
+protocol: socket
 ```
 
 - Socket file is created on startup and removed on shutdown
@@ -222,17 +302,14 @@ For `socket` protocol, `address` is the path to the Unix domain socket:
 
 For `ssl` protocol, add `ssl` object with certificate paths:
 
-```json
-{
-    "address": "0.0.0.0",
-    "port": 10003,
-    "protocol": "ssl",
-    "ssl": {
-        "certfile": "/path/to/server.crt",
-        "keyfile": "/path/to/server.key",
-        "ca_certs": "/path/to/ca.crt"
-    }
-}
+```yaml
+address: 0.0.0.0
+port: 10003
+protocol: ssl
+ssl:
+  certfile: /path/to/server.crt
+  keyfile: /path/to/server.key
+  ca_certs: /path/to/ca.crt
 ```
 
 | Parameter | Description | Required |
@@ -247,14 +324,12 @@ If `ca_certs` is specified, clients must provide a valid certificate signed by t
 
 Restrict client connections by IP address using `allow` and/or `deny` lists:
 
-```json
-{
-    "address": "0.0.0.0",
-    "port": 10001,
-    "protocol": "tcp",
-    "allow": ["192.168.1.0/24", "10.0.0.5"],
-    "deny": ["192.168.1.100"]
-}
+```yaml
+address: 0.0.0.0
+port: 10001
+protocol: tcp
+allow: [192.168.1.0/24, 10.0.0.5]
+deny: [192.168.1.100]
 ```
 
 | Parameter | Description |
@@ -320,12 +395,11 @@ openssl s_client -connect localhost:10003 -cert client.crt -key client.key
 
 Optional HTTP server for monitoring and management:
 
-```json
-{
-    "http": [
-        {"name": "main", "address": "0.0.0.0", "port": 8080}
-    ]
-}
+```yaml
+http:
+  - name: main
+    address: 0.0.0.0
+    port: 8080
 ```
 
 - `name`: optional label for the server (displayed in web UI Settings tab)
@@ -333,19 +407,19 @@ Optional HTTP server for monitoring and management:
 
 With authentication (configured at root level, shared across all HTTP servers):
 
-```json
-{
-    "http": [
-        {"address": "0.0.0.0", "port": 8080}
-    ],
-    "users": [
-        {"login": "admin", "password": "sha256:...", "admin": true}
-    ],
-    "tokens": [
-        {"token": "my-api-key", "name": "monitoring", "admin": false}
-    ],
-    "session_timeout": 3600
-}
+```yaml
+http:
+  - address: 0.0.0.0
+    port: 8080
+users:
+  - login: admin
+    password: sha256:...
+    admin: true
+tokens:
+  - token: my-api-key
+    name: monitoring
+    admin: false
+session_timeout: 3600
 ```
 
 - `users`: login credentials with optional `admin` flag and per-user `session_timeout`
@@ -362,28 +436,25 @@ ser2tcp --hash-password mysecretpassword
 
 HTTPS with SSL:
 
-```json
-{
-    "http": [
-        {"address": "0.0.0.0", "port": 8080},
-        {"address": "0.0.0.0", "port": 8443, "ssl": {
-            "certfile": "server.crt", "keyfile": "server.key"
-        }}
-    ]
-}
+```yaml
+http:
+  - address: 0.0.0.0
+    port: 8080
+  - address: 0.0.0.0
+    port: 8443
+    ssl:
+      certfile: server.crt
+      keyfile: server.key
 ```
 
 With IP filtering:
 
-```json
-{
-    "http": [{
-        "address": "0.0.0.0",
-        "port": 8080,
-        "allow": ["192.168.0.0/16"],
-        "deny": ["192.168.1.100"]
-    }]
-}
+```yaml
+http:
+  - address: 0.0.0.0
+    port: 8080
+    allow: [192.168.0.0/16]
+    deny: [192.168.1.100]
 ```
 
 #### API endpoints
@@ -422,15 +493,32 @@ Authentication: `Authorization: Bearer <token>` header or `?token=<token>` query
 
 ## Usage examples
 
+Run installed command:
+
 ```
-ser2tcp -c ser2tcp.conf
+ser2tcp -c ser2tcp.yaml
 ```
 
 Direct running from repository:
 
 ```
-python run.py -c ser2tcp.conf
+python run.py -c ser2tcp.yaml
 ```
+
+Use a custom config path:
+
+```bash
+ser2tcp -v -c /etc/ser2tcp.yaml
+```
+
+Open the web interface:
+
+```text
+http://127.0.0.1:20080/
+```
+
+The exact port depends on your `http` configuration, or on the first free port
+chosen when the default config is created.
 
 ### Connecting using telnet
 
@@ -440,43 +528,141 @@ telnet localhost 10002
 
 (to exit telnet press `CTRL + ]` and type `quit`)
 
-## Installation as service
+### Connecting to a TCP serial port
+
+```bash
+nc 127.0.0.1 10001
+```
+
+### Using wildcard pools
+
+1. Add a pool to `pools:` in `config.yaml`, or create it from the web UI.
+2. Set `serial.glob`, for example `/dev/serial/by-id/usb-*`.
+3. Set `server.start_port`, for example `11000`.
+4. Start or restart `ser2tcp`.
+5. Each detected device gets a TCP port starting at `start_port`, and the same
+   device identity keeps the same TCP port when it reconnects.
+
+## Autostart and services
 
 ### Linux - systemd user service
 
-1. Copy service file:
+Use this when `ser2tcp` should run as your user account.
+
+1. Install `ser2tcp` so the `ser2tcp` command is available to your user.
+2. Create the user service directory and copy the unit file:
     ```
+    mkdir -p ~/.config/systemd/user
     cp ser2tcp.service ~/.config/systemd/user/
     ```
-2. Configuration file will be created automatically at `~/.config/ser2tcp/config.json` on first run
-3. Reload user systemd services:
+3. If `ser2tcp` is installed in a virtual environment or a non-default path,
+   edit `~/.config/systemd/user/ser2tcp.service` and adjust `ExecStart`.
+4. Configuration file will be created automatically at
+   `~/.config/ser2tcp/config.yaml` on first run.
+5. Reload user systemd services:
     ```
     systemctl --user daemon-reload
     ```
-4. Start and enable service:
+6. Enable autostart and start it now:
     ```
     systemctl --user enable --now ser2tcp
     ```
-5. To allow user services running after boot you need to enable linger (if this is not configured, then service will start after user login and stop after logout):
+7. Check status and logs:
+   ```bash
+   systemctl --user status ser2tcp
+   journalctl --user-unit ser2tcp -e
+   ```
+8. By default a user service starts after login. To keep it running after boot
+   without an interactive login, enable linger:
     ```
     sudo loginctl enable-linger $USER
     ```
 
+This is the simplest Linux autostart setup for a desktop or single-user system.
+
+### Linux - Docker Compose autostart
+
+If you prefer to run `ser2tcp` in a container on Linux, an example stack is
+included in [example/docker-compose.yml](/Users/marcelochsendorf/Downloads/AutoSer2TCP/example/docker-compose.yml).
+
+Start it:
+
+```bash
+cd example
+docker compose up -d --build
+```
+
+Stop it:
+
+```bash
+cd example
+docker compose down
+```
+
+Notes:
+
+- The example uses `network_mode: host`, which is the simplest way to expose
+  both fixed TCP listeners and dynamically assigned pool ports on Linux.
+- The example mounts `/dev:/dev` and uses `privileged: true` so
+  `/dev/serial/by-id/...` and device nodes are visible inside the container.
+- Edit [example/config.yaml](/Users/marcelochsendorf/Downloads/AutoSer2TCP/example/config.yaml)
+  to match your actual serial devices and TCP port layout.
+
 ### Linux - systemd system service
 
-1. Create system user:
+Use this when `ser2tcp` should start automatically for the machine at boot,
+independent of a user login.
+
+1. Install `ser2tcp` system-wide, or note the full path to the executable you
+   want the service to use.
+2. Create a system user with access to serial devices:
     ```
     sudo useradd -r -s /usr/sbin/nologin -G dialout ser2tcp
     ```
-2. Copy service file:
+3. Copy the service file:
     ```
     sudo cp ser2tcp-system.service /etc/systemd/system/ser2tcp.service
     ```
-3. Create configuration file `/etc/ser2tcp.conf`
-4. Reload systemd and start service:
+4. If needed, edit `/etc/systemd/system/ser2tcp.service` and update
+   `ExecStart` to the correct `ser2tcp` path.
+5. Create configuration file `/etc/ser2tcp.yaml`.
+6. Reload systemd and enable autostart:
     ```
     sudo systemctl daemon-reload
     sudo systemctl enable --now ser2tcp
+    ```
+7. Check status and logs:
+   ```bash
+   sudo systemctl status ser2tcp
+   sudo journalctl -u ser2tcp -e
+   ```
+
+If your distribution uses another serial-device group instead of `dialout`,
+adjust the service user accordingly.
+
+### macOS - launchd user agent
+
+1. Copy the launch agent template:
+    ```
+    mkdir -p ~/Library/LaunchAgents
+    cp ser2tcp-macos.plist ~/Library/LaunchAgents/com.github.cortexm.ser2tcp.plist
+    ```
+2. If `ser2tcp` is not on your login shell `PATH`, edit the copied plist and
+   replace `ser2tcp` with the full path from `command -v ser2tcp`.
+3. Configuration file will be created automatically at
+   `~/.config/ser2tcp/config.yaml` on first run.
+4. Load and start the agent:
+    ```
+    launchctl unload ~/Library/LaunchAgents/com.github.cortexm.ser2tcp.plist 2>/dev/null || true
+    launchctl load -w ~/Library/LaunchAgents/com.github.cortexm.ser2tcp.plist
+    ```
+5. Check agent status:
+    ```
+    launchctl print gui/$(id -u)/com.github.cortexm.ser2tcp
+    ```
+6. Stop and disable the agent:
+    ```
+    launchctl unload -w ~/Library/LaunchAgents/com.github.cortexm.ser2tcp.plist
     ```
 
 ### Useful commands
@@ -497,11 +683,25 @@ systemctl --user stop ser2tcp
 
 For system service, use `sudo systemctl` instead of `systemctl --user`.
 
+macOS useful commands:
+
+```bash
+# Check launch agent status
+launchctl print gui/$(id -u)/com.github.cortexm.ser2tcp
+
+# View recent logs
+log show --last 10m --predicate 'process == "ser2tcp"'
+
+# Follow logs
+log stream --predicate 'process == "ser2tcp"'
+```
+
 ## Requirements
 
 - Python 3.8+
 - pyserial 3.0+
 - uhttp-server 2.3.2+ (for HTTP/API and WebSocket)
+- PyYAML 6.0+ (for YAML configuration)
 
 ### Running on
 

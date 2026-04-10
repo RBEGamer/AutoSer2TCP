@@ -292,10 +292,14 @@ class SerialProxy():
             else:
                 raise OSError("Serial reader closed")
         except (OSError, _serial.SerialException) as err:
-            self._log.warning(err)
-            for server in self._servers:
-                server.close_connections()
-            self.disconnect()
+            self._handle_serial_error(err)
+
+    def _handle_serial_error(self, err):
+        """Cleanup after serial I/O failure without stopping the process"""
+        self._log.warning(err)
+        for server in self._servers:
+            server.close_connections()
+        self.disconnect()
 
     def process_read(self, read_sockets):
         """Process sockets with read event"""
@@ -374,4 +378,7 @@ class SerialProxy():
     def send(self, data):
         """Send data to serial port"""
         if self._serial:
-            self._serial.write(data)
+            try:
+                self._serial.write(data)
+            except (OSError, _serial.SerialException) as err:
+                self._handle_serial_error(err)

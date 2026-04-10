@@ -1,10 +1,11 @@
 """Tests for SerialProxy config parsing"""
 
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, Mock
 
 import serial
 
+from ser2tcp.connection_tcp import ConnectionTcp
 from ser2tcp.serial_proxy import SerialProxy
 
 
@@ -256,6 +257,42 @@ class TestSerialProxyName(unittest.TestCase):
                  'port': 10001}]},
             log=log)
         log.info.assert_any_call("Serial: %s", 'mydev')
+
+
+class TestSerialWriteErrors(unittest.TestCase):
+    """Test serial write error handling from client data paths"""
+
+    def _make_proxy(self, error):
+        proxy = SerialProxy.__new__(SerialProxy)
+        _mock_init(proxy)
+        proxy._log = Mock()
+        proxy._serial = Mock()
+        proxy._serial.write.side_effect = error
+        proxy._serial_config = {'port': '/dev/ttyUSB0'}
+        proxy.disconnect = Mock()
+        proxy._servers = [Mock(), Mock()]
+        return proxy
+
+    def _make_connection(self, proxy):
+        sock = Mock()
+        addr = ('127.0.0.1', 12345)
+        return ConnectionTcp((sock, addr), ser=proxy, log=Mock())
+
+    def test_tcp_client_send_handles_oserror(self):
+        proxy = self._make_proxy(OSError("serial write failed"))
+        conn = self._make_connection(proxy)
+        conn.on_received(b'hello')
+        for server in proxy._servers:
+            server.close_connections.assert_called_once()
+        proxy.disconnect.assert_called_once()
+
+    def test_tcp_client_send_handles_serial_exception(self):
+        proxy = self._make_proxy(serial.SerialException("serial write failed"))
+        conn = self._make_connection(proxy)
+        conn.on_received(b'hello')
+        for server in proxy._servers:
+            server.close_connections.assert_called_once()
+        proxy.disconnect.assert_called_once()
 
 
 class TestSignalControl(unittest.TestCase):

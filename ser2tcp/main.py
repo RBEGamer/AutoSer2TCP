@@ -4,14 +4,14 @@ Simple proxy for connecting over TCP or telnet to serial port
 
 import argparse as _argparse
 import importlib.metadata as _metadata
-import json as _json
 import logging as _logging
 import os as _os
 import signal as _signal
-import socket as _socket
 
 import serial.tools.list_ports as _list_ports
 
+import ser2tcp.config_manager as _config_manager
+import ser2tcp.pool_manager as _pool_manager
 import ser2tcp.serial_proxy as _serial_proxy
 import ser2tcp.server_manager as _server_manager
 
@@ -27,43 +27,8 @@ DESCRIPTION_STR = VERSION_STR + """
 https://github.com/cortexm/ser2tcp
 """
 
-DEFAULT_CONFIG_DIR = _os.path.expanduser("~/.config/ser2tcp")
-DEFAULT_CONFIG_PATH = _os.path.join(DEFAULT_CONFIG_DIR, "config.json")
-
-
-def find_free_port(start_port=20080, max_attempts=100):
-    """Find first available port starting from start_port"""
-    for port in range(start_port, start_port + max_attempts):
-        try:
-            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
-                s.bind(('127.0.0.1', port))
-                return port
-        except OSError:
-            continue
-    return None
-
-
-def create_default_config(config_path, log):
-    """Create default config with HTTP server on free port"""
-    port = find_free_port()
-    if port is None:
-        raise SystemExit("Cannot find free port for HTTP server")
-
-    config = {
-        "ports": [],
-        "http": [{"name": "main", "address": "127.0.0.1", "port": port}]
-    }
-
-    config_dir = _os.path.dirname(config_path)
-    if not _os.path.exists(config_dir):
-        _os.makedirs(config_dir)
-
-    with open(config_path, 'w', encoding='utf-8') as f:
-        _json.dump(config, f, indent=2)
-
-    log.info(f"Created default config: {config_path}")
-    log.info(f"HTTP server will start on port {port}")
-    return config
+DEFAULT_CONFIG_DIR = _config_manager.DEFAULT_CONFIG_DIR
+DEFAULT_CONFIG_PATH = _config_manager.DEFAULT_CONFIG_PATH
 
 
 def list_usb_devices():
@@ -105,7 +70,7 @@ def main():
         help="Hash password for config file and exit")
     parser.add_argument(
         '-c', '--config', default=DEFAULT_CONFIG_PATH,
-        help=f"configuration in JSON format (default: {DEFAULT_CONFIG_PATH})")
+        help=f"configuration in YAML format (default: {DEFAULT_CONFIG_PATH})")
     args = parser.parse_args()
 
     if args.hash_password:
@@ -123,24 +88,26 @@ def main():
 
     config_path = args.config
     if _os.path.exists(config_path):
-        with open(config_path, "r", encoding='utf-8') as config_file:
-            configuration = _json.load(config_file)
+        try:
+            config_store = _config_manager.load_config(config_path)
+        except _config_manager.ConfigError as err:
+            raise SystemExit(str(err)) from err
     else:
         if config_path == DEFAULT_CONFIG_PATH:
-            configuration = create_default_config(config_path, log)
+            try:
+                config_store = _config_manager.create_default_config(
+                    config_path, log)
+            except _config_manager.ConfigError as err:
+                raise SystemExit(str(err)) from err
         else:
             raise SystemExit(f"Config file not found: {config_path}")
+    configuration = config_store.data
 
-    if isinstance(configuration, list):
-        ports = configuration
-    elif isinstance(configuration, dict):
-        ports = configuration.get('ports', [])
-    else:
-        raise SystemExit("Invalid configuration format")
-
-    http_config = configuration.get('http') if isinstance(configuration, dict) else None
-    if not ports and not http_config:
-        raise SystemExit("No ports or HTTP server configured")
+    ports = configuration.get('ports', [])
+    pools = configuration.get('pools', [])
+    http_config = configuration.get('http')
+    if not ports and not pools and not http_config:
+        raise SystemExit("No ports, pools, or HTTP server configured")
 
     servers_manager = _server_manager.ServersManager()
     serial_proxies = []
@@ -153,12 +120,18 @@ def main():
         serial_proxies.append(proxy)
         servers_manager.add_server(proxy)
 
-    if isinstance(configuration, dict) and 'http' in configuration:
+    pool_manager = None
+    if pools:
+        pool_manager = _pool_manager.PoolManager(config_store, log)
+        servers_manager.add_server(pool_manager)
+
+    if 'http' in configuration:
         import ser2tcp.http_server as _http_server
         http_server = _http_server.HttpServerWrapper(
             configuration['http'], serial_proxies, log,
             config_path=args.config, configuration=configuration,
-            server_manager=servers_manager)
+            server_manager=servers_manager, config_store=config_store,
+            pool_manager=pool_manager)
         servers_manager.add_server(http_server)
 
     _signal.signal(_signal.SIGTERM, servers_manager.stop)

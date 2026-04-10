@@ -208,17 +208,20 @@ button { padding: 0.4em 1em; border: none; border-radius: 6px;
 .token-value:hover { color: var(--primary); }
 .token-value.copied { color: var(--success); }
 .token-value.copied::after { content: ' (copied)'; font-family: inherit; }
-.port-edit, .http-edit, .user-edit { background: var(--bg-card); padding: 1em 1.2em; margin: 0;
+.port-edit, .pool-edit, .http-edit, .user-edit { background: var(--bg-card); padding: 1em 1.2em; margin: 0;
   border-radius: 8px; box-shadow: 0 1px 4px var(--shadow);
   border: 2px solid var(--edit-border); grid-column: 1 / -1; }
-.port-edit h3, .http-edit h3, .user-edit h3 { margin: 0.8em 0 0.3em; color: var(--text-secondary);
+.port-edit h3, .pool-edit h3, .http-edit h3, .user-edit h3 { margin: 0.8em 0 0.3em; color: var(--text-secondary);
   font-size: 0.95em; font-weight: 600; }
-.port-edit h3:first-child, .http-edit h3:first-child, .user-edit h3:first-child { margin-top: 0; }
+.port-edit h3:first-child, .pool-edit h3:first-child, .http-edit h3:first-child, .user-edit h3:first-child { margin-top: 0; }
 .edit-buttons { display: flex; gap: 0.5em; margin-top: 1em; }
 .field-row { display: flex; align-items: center; gap: 0.5em;
   margin: 0.4em 0; flex-wrap: wrap; }
 .field-row label { min-width: 7em; color: var(--text-secondary);
   font-size: 0.9em; }
+.field-row label.field-help, .match-row label.field-help {
+  display: inline-flex; align-items: center; gap: 0.35em; cursor: help;
+}
 .field-row input[type="text"],
 .field-row input[type="password"],
 .field-row select { flex: 1; min-width: 8em; max-width: 20em; }
@@ -230,6 +233,22 @@ button { padding: 0.4em 1em; border: none; border-radius: 6px;
 .match-row input[type="checkbox"] { margin: 0; }
 .match-row label { min-width: 7em; color: var(--text-secondary);
   font-size: 0.9em; }
+.help-tip { display: inline-flex; align-items: center; justify-content: center;
+  width: 1.2em; height: 1.2em; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg-server);
+  color: var(--text-muted); font-size: 0.78em; line-height: 1;
+  font-weight: 700; cursor: help; user-select: none; }
+.help-tip:hover, .help-tip:focus { border-color: var(--accent); color: var(--accent);
+  outline: none; }
+.help-tooltip { position: absolute; z-index: 200; max-width: 24em;
+  padding: 0.6em 0.75em; border-radius: 8px; background: var(--dialog-bg);
+  border: 1px solid var(--border); box-shadow: 0 6px 18px var(--shadow);
+  color: var(--text); font-size: 0.85em; line-height: 1.35;
+  pointer-events: none; white-space: normal; }
+.help-tooltip::before { content: ''; position: absolute; top: -6px; left: 14px;
+  width: 10px; height: 10px; background: var(--dialog-bg);
+  border-left: 1px solid var(--border); border-top: 1px solid var(--border);
+  transform: rotate(45deg); }
 .match-row input[type="text"] { flex: 1; max-width: 16em; }
 .match-preview { color: var(--text-muted); font-size: 0.85em; margin: 0.5em 0;
   font-style: italic; }
@@ -258,6 +277,16 @@ button { padding: 0.4em 1em; border: none; border-radius: 6px;
   padding: 0 0.2em; cursor: pointer; vertical-align: middle; }
 .btn-disconnect:hover { color: var(--danger); }
 .detect-link { color: var(--accent); text-decoration: none; cursor: pointer; }
+.assignment-list { list-style: none; padding-left: 0; margin: 0.5em 0 0; }
+.assignment-list li { display: flex; justify-content: space-between; gap: 0.8em;
+  align-items: flex-start; padding: 0.45em 0; border-top: 1px solid var(--border-light); }
+.assignment-list li:first-child { border-top: none; }
+.assignment-main { min-width: 0; flex: 1; }
+.assignment-title { color: var(--text-secondary); font-weight: 600; }
+.assignment-meta { color: var(--text-muted); font-size: 0.85em; word-break: break-all; }
+.assignment-actions { display: flex; gap: 0.4em; flex-shrink: 0; }
+.pool-summary { color: var(--text-muted); font-size: 0.9em; margin: 0.3em 0; }
+.pool-inline-actions { display: flex; gap: 0.5em; margin-top: 0.8em; flex-wrap: wrap; }
 .detect-link:hover { text-decoration: underline; }
 .ws-links { display: flex; gap: 0.8em; margin-top: 0.2em; font-size: 0.9em; }
 .control-signals { color: var(--text-muted); font-size: 0.85em;

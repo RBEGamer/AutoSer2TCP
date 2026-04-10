@@ -1,0 +1,24 @@
+http:
+  - name: main
+    address: 0.0.0.0
+    port: 20080
+
+ports:
+  - name: usb-console
+    serial:
+      port: /dev/ttyUSB0
+      baudrate: 115200
+    servers:
+      - protocol: tcp
+        address: 0.0.0.0
+        port: 10001
+
+pools:
+  - name: usb-by-id
+    enabled: true
+    serial:
+      glob: /dev/serial/by-id/usb-*
+      baudrate: 115200
+    server:
+      address: 0.0.0.0
+      start_port: 11000

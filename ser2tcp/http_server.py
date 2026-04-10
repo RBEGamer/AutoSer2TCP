@@ -1,18 +1,20 @@
 """HTTP server integration with uhttp"""
 
-import json as _json
+import copy as _copy
 import logging as _logging
 import os as _os
 import pathlib as _pathlib
 import ssl as _ssl
 
 import serial.tools.list_ports as _list_ports
+import yaml as _yaml
 
 import uhttp.server as _uhttp_server
 
 import ser2tcp.http_auth as _http_auth
 import ser2tcp.connection_control as _control
 import ser2tcp.ip_filter as _ip_filter
+import ser2tcp.pool_manager as _pool_manager
 import ser2tcp.serial_proxy as _serial_proxy
 import ser2tcp.server as _server
 
@@ -24,12 +26,14 @@ class HttpServerWrapper():
 
     def __init__(self, configs, serial_proxies, log=None,
             config_path=None, configuration=None,
-            server_manager=None):
+            server_manager=None, config_store=None, pool_manager=None):
         self._log = log if log else _logging.getLogger(__name__)
         self._serial_proxies = serial_proxies
         self._server_manager = server_manager
         self._config_path = config_path
         self._configuration = configuration if configuration else {}
+        self._config_store = config_store
+        self._pool_manager = pool_manager
         if isinstance(configs, dict):
             configs = [configs]
         # Auth config at root level (users, tokens, session_timeout)
@@ -85,6 +89,27 @@ class HttpServerWrapper():
             self._servers.append((_uhttp_server.HttpServer(
                 address=address, port=port, ssl_context=ssl_context,
                 event_mode=True), ip_flt))
+
+    def _ensure_pool_manager(self):
+        """Create pool manager lazily when pool API is first used."""
+        if self._pool_manager:
+            return self._pool_manager
+        self._configuration.setdefault('pools', [])
+        config_store = self._config_store
+        if config_store is None:
+            class _InlineConfigStore():
+                def __init__(self, wrapper):
+                    self.data = wrapper._configuration
+                    self._wrapper = wrapper
+
+                def save(self):
+                    self._wrapper._save_config()
+
+            config_store = _InlineConfigStore(self)
+        self._pool_manager = _pool_manager.PoolManager(config_store, self._log)
+        if self._server_manager:
+            self._server_manager.add_server(self._pool_manager)
+        return self._pool_manager
 
     def _create_http_server(self, config):
         """Create a single HTTP server from config, return (server, ip_flt) or None"""
@@ -290,6 +315,26 @@ class HttpServerWrapper():
         self._log.warning("%s", error)
         client.respond({'error': error}, status=status)
 
+    def _format_connection_address(self, server, connection):
+        """Return formatted address for socket or WebSocket connections"""
+        protocol = getattr(server, 'protocol', '')
+        if isinstance(protocol, str) and protocol.upper() == 'WEBSOCKET':
+            addr = getattr(connection, 'addr', None)
+            if isinstance(addr, tuple) and len(addr) >= 2:
+                return "%s:%d" % (addr[0], addr[1])
+            if addr is not None:
+                return str(addr)
+            return 'unknown'
+        return connection.address_str()
+
+    def _disconnect_connection(self, server, connection):
+        """Disconnect a runtime connection across supported server types"""
+        protocol = getattr(server, 'protocol', '')
+        if isinstance(protocol, str) and protocol.upper() == 'WEBSOCKET':
+            server.remove_connection(connection)
+            return
+        server._remove_connection(connection)
+
     def _require_auth(self, client):
         """Check authentication, return user info or None (sends 401)"""
         if not self._auth or self._auth.is_empty:
@@ -342,10 +387,17 @@ class HttpServerWrapper():
                 self._handle_api_ports_add(client, user)
             else:
                 self._error(client, 'Method not allowed', 405)
+        elif client.path == '/api/pools':
+            if client.method == 'POST':
+                self._handle_api_pools_add(client, user)
+            else:
+                self._error(client, 'Method not allowed', 405)
         elif client.method == 'GET' and client.path == '/api/signals':
             self._handle_api_signals(client)
         elif client.path.startswith('/api/ports/'):
             self._route_api_ports_item(client, user)
+        elif client.path.startswith('/api/pools/'):
+            self._route_api_pools_item(client, user)
         elif client.path == '/api/users':
             if client.method == 'GET':
                 self._handle_api_users_list(client, user)
@@ -486,7 +538,8 @@ class HttpServerWrapper():
                 port_info['signals'] = signals
             ports.append(port_info)
         is_admin = user.get('admin', False) if user else False
-        client.respond({'ports': ports, 'admin': is_admin})
+        pools = self._pool_manager.status() if self._pool_manager else []
+        client.respond({'ports': ports, 'pools': pools, 'admin': is_admin})
 
     def _handle_api_detect(self, client):
         """Return list of available serial ports"""
@@ -529,11 +582,14 @@ class HttpServerWrapper():
 
     def _save_config(self):
         """Save configuration to config file"""
+        if self._config_store is not None:
+            self._config_store.save()
+            return
         if not self._config_path or not self._configuration:
             return
         with open(self._config_path, 'w', encoding='utf-8') as f:
-            _json.dump(self._configuration, f, indent=4)
-            f.write('\n')
+            _yaml.safe_dump(
+                self._configuration, f, sort_keys=False, allow_unicode=False)
 
     def _get_ports_config(self):
         """Get ports list from configuration"""
@@ -541,6 +597,10 @@ class HttpServerWrapper():
         if isinstance(self._configuration, list):
             ports = self._configuration
         return ports
+
+    def _get_pools_config(self):
+        """Get pools list from configuration."""
+        return self._configuration.setdefault('pools', [])
 
     def _route_api_ports_item(self, client, user):
         """Route /api/ports/<index>/... requests"""
@@ -573,6 +633,64 @@ class HttpServerWrapper():
                 srv_idx, con_idx)
         else:
             self._error(client, 'Not found', 404)
+
+    def _route_api_pools_item(self, client, user):
+        """Route /api/pools/<index>/... requests."""
+        if not self._pool_manager:
+            self._error(client, 'Pool not found', 404)
+            return
+        rest = client.path[len('/api/pools/'):]
+        parts = rest.split('/')
+        try:
+            index = int(parts[0])
+        except ValueError:
+            self._error(client, 'Invalid pool index', 400)
+            return
+        if len(parts) == 1:
+            if client.method == 'PUT':
+                self._handle_api_pools_update(client, user, index)
+            elif client.method == 'DELETE':
+                self._handle_api_pools_delete(client, user, index)
+            else:
+                self._error(client, 'Method not allowed', 405)
+            return
+        if len(parts) == 2 and parts[1] == 'state':
+            if client.method == 'PUT':
+                self._handle_api_pools_state(client, user, index)
+            else:
+                self._error(client, 'Method not allowed', 405)
+            return
+        if len(parts) == 2 and parts[1] == 'assignments':
+            if client.method == 'POST':
+                self._handle_api_assignments_add(client, user, index)
+            else:
+                self._error(client, 'Method not allowed', 405)
+            return
+        if len(parts) == 4 and parts[1] == 'assignments' and parts[3] == 'state':
+            try:
+                assignment_index = int(parts[2])
+            except ValueError:
+                self._error(client, 'Invalid assignment index', 400)
+                return
+            if client.method == 'PUT':
+                self._handle_api_assignments_state(
+                    client, user, index, assignment_index)
+            else:
+                self._error(client, 'Method not allowed', 405)
+            return
+        if len(parts) == 3 and parts[1] == 'assignments':
+            try:
+                assignment_index = int(parts[2])
+            except ValueError:
+                self._error(client, 'Invalid assignment index', 400)
+                return
+            if client.method == 'DELETE':
+                self._handle_api_assignments_delete(
+                    client, user, index, assignment_index)
+            else:
+                self._error(client, 'Method not allowed', 405)
+            return
+        self._error(client, 'Not found', 404)
 
     def _validate_port_config(self, data):
         """Validate port configuration, return error string or None"""
@@ -638,6 +756,36 @@ class HttpServerWrapper():
                 max_conn = srv['max_connections']
                 if not isinstance(max_conn, int) or max_conn < 0:
                     return 'max_connections must be 0 or positive integer'
+        return None
+
+    def _validate_pool_config(self, data):
+        """Validate wildcard pool config, return error string or None."""
+        if not isinstance(data, dict):
+            return f'Expected JSON object, got {type(data).__name__}'
+        serial = data.get('serial')
+        if not isinstance(serial, dict):
+            return 'serial config required'
+        glob_pattern = serial.get('glob')
+        if not isinstance(glob_pattern, str) or not glob_pattern.strip():
+            return 'serial.glob is required'
+        server = data.get('server')
+        if not isinstance(server, dict):
+            return 'server config required'
+        start_port = server.get('start_port')
+        if not isinstance(start_port, int) or start_port < 1 or start_port > 65535:
+            return 'server.start_port must be 1-65535'
+        if 'address' in server and not isinstance(server['address'], str):
+            return 'server.address must be a string'
+        if 'send_timeout' in server and not isinstance(
+                server['send_timeout'], (int, float)):
+            return 'server.send_timeout must be numeric'
+        if 'buffer_limit' in server and server['buffer_limit'] is not None:
+            if not isinstance(server['buffer_limit'], int) or server['buffer_limit'] < 0:
+                return 'server.buffer_limit must be null or positive integer'
+        if 'max_connections' in server:
+            max_conn = server['max_connections']
+            if not isinstance(max_conn, int) or max_conn < 0:
+                return 'server.max_connections must be 0 or positive integer'
         return None
 
     def _get_used_endpoints(self, exclude_index=None):
@@ -759,6 +907,136 @@ class HttpServerWrapper():
         self._log.info("Port deleted: %d", index)
         client.respond({'ok': True})
 
+    def _handle_api_pools_add(self, client, user):
+        """Add wildcard pool configuration."""
+        if not self._require_admin(client, user):
+            return
+        data = client.data
+        error = self._validate_pool_config(data)
+        if error:
+            self._error(client, error, 400)
+            return
+        try:
+            index = self._ensure_pool_manager().add_pool(data)
+        except _pool_manager.PoolValidationError as err:
+            self._error(client, str(err), 400)
+            return
+        self._log.info("Pool added: %d", index)
+        client.respond({'ok': True, 'index': index}, status=201)
+
+    def _handle_api_pools_update(self, client, user, index):
+        """Update wildcard pool config."""
+        if not self._require_admin(client, user):
+            return
+        if not self._pool_manager:
+            self._error(client, 'Pool not found', 404)
+            return
+        data = client.data
+        error = self._validate_pool_config(data)
+        if error:
+            self._error(client, error, 400)
+            return
+        try:
+            self._pool_manager.update_pool(index, data)
+        except _pool_manager.PoolValidationError as err:
+            self._error(client, str(err), 404)
+            return
+        self._log.info("Pool updated: %d", index)
+        client.respond({'ok': True})
+
+    def _handle_api_pools_delete(self, client, user, index):
+        """Delete wildcard pool config."""
+        if not self._require_admin(client, user):
+            return
+        if not self._pool_manager:
+            self._error(client, 'Pool not found', 404)
+            return
+        try:
+            self._pool_manager.delete_pool(index)
+        except _pool_manager.PoolValidationError as err:
+            self._error(client, str(err), 404)
+            return
+        self._log.info("Pool deleted: %d", index)
+        client.respond({'ok': True})
+
+    def _handle_api_pools_state(self, client, user, index):
+        """Enable or disable a pool."""
+        if not self._require_admin(client, user):
+            return
+        if not self._pool_manager:
+            self._error(client, 'Pool not found', 404)
+            return
+        data = client.data
+        if not isinstance(data, dict) or 'enabled' not in data:
+            self._error(client, 'enabled is required', 400)
+            return
+        try:
+            self._pool_manager.set_pool_enabled(index, bool(data['enabled']))
+        except _pool_manager.PoolValidationError as err:
+            self._error(client, str(err), 404)
+            return
+        client.respond({'ok': True})
+
+    def _handle_api_assignments_add(self, client, user, pool_index):
+        """Add one explicit pool assignment."""
+        if not self._require_admin(client, user):
+            return
+        if not self._pool_manager:
+            self._error(client, 'Pool not found', 404)
+            return
+        data = client.data
+        if not isinstance(data, dict):
+            self._error(client, 'Invalid request', 400)
+            return
+        identity = data.get('identity', '').strip()
+        if not identity:
+            self._error(client, 'identity is required', 400)
+            return
+        name = data.get('name')
+        enabled = bool(data.get('enabled', True))
+        try:
+            index = self._pool_manager.add_assignment(
+                pool_index, identity, name=name, enabled=enabled)
+        except _pool_manager.PoolValidationError as err:
+            self._error(client, str(err), 400)
+            return
+        client.respond({'ok': True, 'index': index}, status=201)
+
+    def _handle_api_assignments_state(self, client, user, pool_index,
+            assignment_index):
+        """Enable or disable one assignment."""
+        if not self._require_admin(client, user):
+            return
+        if not self._pool_manager:
+            self._error(client, 'Pool not found', 404)
+            return
+        data = client.data
+        if not isinstance(data, dict) or 'enabled' not in data:
+            self._error(client, 'enabled is required', 400)
+            return
+        try:
+            self._pool_manager.set_assignment_enabled(
+                pool_index, assignment_index, bool(data['enabled']))
+        except _pool_manager.PoolValidationError as err:
+            self._error(client, str(err), 404)
+            return
+        client.respond({'ok': True})
+
+    def _handle_api_assignments_delete(self, client, user, pool_index,
+            assignment_index):
+        """Delete one assignment."""
+        if not self._require_admin(client, user):
+            return
+        if not self._pool_manager:
+            self._error(client, 'Pool not found', 404)
+            return
+        try:
+            self._pool_manager.delete_assignment(pool_index, assignment_index)
+        except _pool_manager.PoolValidationError as err:
+            self._error(client, str(err), 404)
+            return
+        client.respond({'ok': True})
+
     def _handle_api_set_signals(self, client, user, index):
         """Set RTS/DTR signals on a port"""
         if not self._require_admin(client, user):
@@ -795,8 +1073,8 @@ class HttpServerWrapper():
             self._error(client, 'Connection not found', 404)
             return
         con = server.connections[con_idx]
-        addr = con.address_str()
-        server._remove_connection(con)
+        addr = self._format_connection_address(server, con)
+        self._disconnect_connection(server, con)
         self._log.info("Disconnected: %s", addr)
         client.respond({'ok': True})
 
@@ -1107,28 +1385,45 @@ class HttpServerWrapper():
         if error:
             self._error(client, error, 400)
             return
-        old = http_list[index]
+        old = _copy.deepcopy(http_list[index])
         srv = {'address': data.get('address', '0.0.0.0'), 'port': data['port']}
         if data.get('name'):
             srv['name'] = data['name']
         if 'ssl' in data:
             srv['ssl'] = data['ssl']
-        http_list[index] = srv
-        self._save_config()
         # Check if restart needed (address/port/ssl changed)
         needs_restart = (
             old.get('address', '0.0.0.0') != srv.get('address', '0.0.0.0') or
             old.get('port') != srv.get('port') or
             old.get('ssl') != srv.get('ssl'))
         if needs_restart and index < len(self._servers):
-            # Restart only this server
             server, _ = self._servers[index]
-            server.close()
-            try:
-                self._servers[index] = self._create_http_server(srv)
-            except ValueError as e:
-                self._error(client, str(e), 400)
-                return
+            same_bind = (
+                old.get('address', '0.0.0.0') == srv.get('address', '0.0.0.0')
+                and old.get('port') == srv.get('port'))
+            if same_bind:
+                server.close()
+                try:
+                    replacement = self._create_http_server(srv)
+                except ValueError as err:
+                    try:
+                        self._servers[index] = self._create_http_server(old)
+                    except ValueError as rollback_err:
+                        self._log.error(
+                            "Failed to restore HTTP server %d: %s",
+                            index, rollback_err)
+                    self._error(client, str(err), 400)
+                    return
+            else:
+                try:
+                    replacement = self._create_http_server(srv)
+                except ValueError as err:
+                    self._error(client, str(err), 400)
+                    return
+                server.close()
+            self._servers[index] = replacement
+        http_list[index] = srv
+        self._save_config()
         self._log.info("HTTP server updated")
         client.respond({'ok': True})
 

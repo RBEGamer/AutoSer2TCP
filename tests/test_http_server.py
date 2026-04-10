@@ -1,7 +1,10 @@
 """Tests for HTTP server wrapper"""
 
+import tempfile
 import unittest
 from unittest.mock import Mock, MagicMock, patch
+
+import yaml
 
 from ser2tcp.http_auth import hash_password
 from ser2tcp.http_server import HttpServerWrapper
@@ -28,11 +31,13 @@ class MockClient:
         self.respond_status = 200
 
 
-def make_wrapper(auth_config=None, serial_proxies=None):
+def make_wrapper(auth_config=None, serial_proxies=None, configuration=None,
+        config_store=None, pool_manager=None, server_manager=None,
+        config_path=None):
     """Create HttpServerWrapper with mocked uhttp server"""
     http_config = {'address': '127.0.0.1', 'port': 0}
     # Auth config goes at root level of configuration
-    configuration = {'http': [http_config]}
+    configuration = configuration or {'http': [http_config]}
     if auth_config:
         if 'users' in auth_config:
             configuration['users'] = auth_config['users']
@@ -43,7 +48,9 @@ def make_wrapper(auth_config=None, serial_proxies=None):
     proxies = serial_proxies if serial_proxies is not None else []
     with patch('ser2tcp.http_server._uhttp_server.HttpServer'):
         return HttpServerWrapper(http_config, proxies, log=Mock(),
-            configuration=configuration)
+            configuration=configuration, config_store=config_store,
+            pool_manager=pool_manager, server_manager=server_manager,
+            config_path=config_path)
 
 
 class TestRouting(unittest.TestCase):
@@ -354,6 +361,22 @@ class TestApiStatus(unittest.TestCase):
         srv = client.responded['ports'][0]['servers'][0]
         self.assertNotIn('ssl', srv)
 
+    def test_status_includes_pools(self):
+        pools = [{
+            'name': 'USB devices',
+            'enabled': True,
+            'serial': {'glob': '/dev/serial/by-id/usb-*'},
+            'server': {'address': '0.0.0.0', 'start_port': 11000},
+            'matches': ['/dev/serial/by-id/usb-dev1'],
+            'assignments': [],
+        }]
+        pool_manager = Mock()
+        pool_manager.status.return_value = pools
+        wrapper = make_wrapper(pool_manager=pool_manager)
+        client = MockClient(path='/api/status')
+        wrapper._handle_request(client)
+        self.assertEqual(client.responded['pools'], pools)
+
 
 class TestApiDisconnect(unittest.TestCase):
     def _make_connection(self, address='192.168.1.5:54321'):
@@ -388,6 +411,26 @@ class TestApiDisconnect(unittest.TestCase):
         wrapper._handle_request(client)
         self.assertEqual(client.respond_status, 200)
         server._remove_connection.assert_called_once_with(con)
+
+    def test_disconnect_websocket_client(self):
+        con = Mock()
+        con.addr = ('192.168.1.5', 54321)
+        server = Mock()
+        server.protocol = 'WEBSOCKET'
+        server.connections = [con]
+        proxy = Mock()
+        proxy.serial_config = {'port': '/dev/ttyUSB0'}
+        proxy.match = None
+        proxy.name = ''
+        proxy.is_connected = True
+        proxy.servers = [server]
+        wrapper = make_wrapper(serial_proxies=[proxy])
+        client = MockClient(
+            method='DELETE',
+            path='/api/ports/0/connections/0/0')
+        wrapper._handle_request(client)
+        self.assertEqual(client.respond_status, 200)
+        server.remove_connection.assert_called_once_with(con)
 
     def test_disconnect_port_not_found(self):
         wrapper = make_wrapper(serial_proxies=[])
@@ -929,6 +972,190 @@ class TestApiPortsCrud(unittest.TestCase):
         old_proxy.close.assert_called_once()
 
 
+class TestApiPoolsCrud(unittest.TestCase):
+    """Tests for wildcard pool CRUD API."""
+
+    def _auth_config(self):
+        return {
+            'users': [{
+                'login': 'admin',
+                'password': hash_password('secret'),
+                'admin': True,
+            }],
+        }
+
+    def _admin_token(self, wrapper):
+        client = MockClient(
+            method='POST', path='/api/login',
+            data={'login': 'admin', 'password': 'secret'})
+        wrapper._handle_request(client)
+        return client.responded['token']
+
+    def _auth_client(self, token, method='GET', path='/', data=None):
+        return MockClient(
+            method=method, path=path, data=data,
+            headers={'authorization': f'Bearer {token}'})
+
+    def _pool_config(self):
+        return {
+            'name': 'USB pool',
+            'enabled': True,
+            'serial': {
+                'glob': '/dev/serial/by-id/usb-*',
+                'baudrate': 115200,
+            },
+            'server': {
+                'address': '0.0.0.0',
+                'start_port': 11000,
+            },
+        }
+
+    def test_add_pool_creates_manager_and_persists_yaml(self):
+        configuration = {
+            'http': [{'address': '127.0.0.1', 'port': 0}],
+            'users': self._auth_config()['users'],
+            'ports': [],
+            'pools': [],
+        }
+        server_manager = Mock()
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch('ser2tcp.pool_manager._glob.glob', return_value=[]):
+            config_path = f'{tmpdir}/config.yaml'
+            wrapper = make_wrapper(
+                configuration=configuration, server_manager=server_manager,
+                config_path=config_path)
+            token = self._admin_token(wrapper)
+            client = self._auth_client(
+                token, method='POST', path='/api/pools',
+                data=self._pool_config())
+            wrapper._handle_request(client)
+
+            self.assertEqual(client.respond_status, 201)
+            self.assertEqual(client.responded['index'], 0)
+            server_manager.add_server.assert_called_once_with(
+                wrapper._pool_manager)
+            with open(config_path, 'r', encoding='utf-8') as config_file:
+                saved = yaml.safe_load(config_file)
+            self.assertEqual(saved['pools'][0]['serial']['glob'],
+                '/dev/serial/by-id/usb-*')
+
+    def test_update_pool(self):
+        pool_manager = Mock()
+        wrapper = make_wrapper(
+            auth_config=self._auth_config(), pool_manager=pool_manager)
+        token = self._admin_token(wrapper)
+        client = self._auth_client(
+            token, method='PUT', path='/api/pools/0',
+            data=self._pool_config())
+        wrapper._handle_request(client)
+        self.assertEqual(client.respond_status, 200)
+        pool_manager.update_pool.assert_called_once_with(0, self._pool_config())
+
+    def test_delete_pool(self):
+        pool_manager = Mock()
+        wrapper = make_wrapper(
+            auth_config=self._auth_config(), pool_manager=pool_manager)
+        token = self._admin_token(wrapper)
+        client = self._auth_client(
+            token, method='DELETE', path='/api/pools/0')
+        wrapper._handle_request(client)
+        self.assertEqual(client.respond_status, 200)
+        pool_manager.delete_pool.assert_called_once_with(0)
+
+    def test_set_pool_state(self):
+        pool_manager = Mock()
+        wrapper = make_wrapper(
+            auth_config=self._auth_config(), pool_manager=pool_manager)
+        token = self._admin_token(wrapper)
+        client = self._auth_client(
+            token, method='PUT', path='/api/pools/0/state',
+            data={'enabled': False})
+        wrapper._handle_request(client)
+        self.assertEqual(client.respond_status, 200)
+        pool_manager.set_pool_enabled.assert_called_once_with(0, False)
+
+    def test_add_assignment(self):
+        pool_manager = Mock()
+        pool_manager.add_assignment.return_value = 0
+        wrapper = make_wrapper(
+            auth_config=self._auth_config(), pool_manager=pool_manager)
+        token = self._admin_token(wrapper)
+        client = self._auth_client(
+            token, method='POST', path='/api/pools/0/assignments',
+            data={'identity': '/dev/serial/by-id/usb-dev1', 'name': 'Dev 1'})
+        wrapper._handle_request(client)
+        self.assertEqual(client.respond_status, 201)
+        pool_manager.add_assignment.assert_called_once_with(
+            0, '/dev/serial/by-id/usb-dev1', name='Dev 1', enabled=True)
+
+    def test_set_assignment_state(self):
+        pool_manager = Mock()
+        wrapper = make_wrapper(
+            auth_config=self._auth_config(), pool_manager=pool_manager)
+        token = self._admin_token(wrapper)
+        client = self._auth_client(
+            token, method='PUT', path='/api/pools/0/assignments/1/state',
+            data={'enabled': False})
+        wrapper._handle_request(client)
+        self.assertEqual(client.respond_status, 200)
+        pool_manager.set_assignment_enabled.assert_called_once_with(0, 1, False)
+
+    def test_delete_assignment(self):
+        pool_manager = Mock()
+        wrapper = make_wrapper(
+            auth_config=self._auth_config(), pool_manager=pool_manager)
+        token = self._admin_token(wrapper)
+        client = self._auth_client(
+            token, method='DELETE', path='/api/pools/0/assignments/1')
+        wrapper._handle_request(client)
+        self.assertEqual(client.respond_status, 200)
+        pool_manager.delete_assignment.assert_called_once_with(0, 1)
+
+    def test_add_pool_requires_admin(self):
+        wrapper = make_wrapper(auth_config=self._auth_config())
+        wrapper._auth.add_user('viewer', 'pass')
+        login = MockClient(
+            method='POST', path='/api/login',
+            data={'login': 'viewer', 'password': 'pass'})
+        wrapper._handle_request(login)
+        token = login.responded['token']
+        client = self._auth_client(
+            token, method='POST', path='/api/pools',
+            data=self._pool_config())
+        wrapper._handle_request(client)
+        self.assertEqual(client.respond_status, 403)
+
+    def test_add_pool_invalid_config(self):
+        wrapper = make_wrapper(auth_config=self._auth_config())
+        token = self._admin_token(wrapper)
+        client = self._auth_client(
+            token, method='POST', path='/api/pools',
+            data={'serial': {'glob': ''}, 'server': {'start_port': 11000}})
+        wrapper._handle_request(client)
+        self.assertEqual(client.respond_status, 400)
+
+
+class TestYamlPersistence(unittest.TestCase):
+    def test_save_config_writes_yaml(self):
+        configuration = {
+            'http': [{'address': '127.0.0.1', 'port': 0}],
+            'ports': [{
+                'serial': {'port': '/dev/ttyUSB0'},
+                'servers': [{'protocol': 'tcp', 'address': '0.0.0.0',
+                    'port': 10001}],
+            }],
+            'pools': [],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f'{tmpdir}/config.yaml'
+            wrapper = make_wrapper(
+                configuration=configuration, config_path=path)
+            wrapper._save_config()
+            with open(path, 'r', encoding='utf-8') as config_file:
+                saved = yaml.safe_load(config_file)
+        self.assertEqual(saved, configuration)
+
+
 class TestControlValidation(unittest.TestCase):
     """Tests for control config validation in port API"""
 
@@ -1063,6 +1290,98 @@ class TestConfigVariants(unittest.TestCase):
                 {'address': '0.0.0.0', 'port': 8081},
             ], [], log=Mock())
             self.assertEqual(mock.call_count, 2)
+
+
+class TestApiHttpCrud(unittest.TestCase):
+    """Tests for HTTP listener CRUD API"""
+
+    def _auth_config(self):
+        return {
+            'users': [{
+                'login': 'admin',
+                'password': hash_password('secret'),
+                'admin': True,
+            }],
+        }
+
+    def _admin_token(self, wrapper):
+        client = MockClient(
+            method='POST', path='/api/login',
+            data={'login': 'admin', 'password': 'secret'})
+        wrapper._handle_request(client)
+        return client.responded['token']
+
+    def _auth_client(self, token, method='GET', path='/', data=None):
+        return MockClient(
+            method=method, path=path, data=data,
+            headers={'authorization': f'Bearer {token}'})
+
+    def _make_wrapper(self, http_configs=None):
+        auth = self._auth_config()
+        configuration = {
+            'http': http_configs or [{'address': '127.0.0.1', 'port': 8080}],
+            'users': auth['users'],
+        }
+        with patch('ser2tcp.http_server._uhttp_server.HttpServer'):
+            return HttpServerWrapper(
+                configuration['http'], [], log=Mock(),
+                configuration=configuration)
+
+    def test_update_http_server_restarts_transactionally(self):
+        wrapper = self._make_wrapper([{'address': '127.0.0.1', 'port': 8080}])
+        token = self._admin_token(wrapper)
+        old_server = Mock()
+        new_server = Mock()
+        wrapper._servers = [(old_server, None)]
+        order = []
+
+        def create_server(_config):
+            order.append('create')
+            return (new_server, None)
+
+        old_server.close.side_effect = lambda: order.append('close')
+        with patch.object(wrapper, '_create_http_server',
+                side_effect=create_server), \
+                patch.object(wrapper, '_save_config') as mock_save:
+            client = self._auth_client(
+                token, method='PUT', path='/api/settings/http/0',
+                data={'address': '127.0.0.1', 'port': 8081})
+            wrapper._handle_request(client)
+
+        self.assertEqual(client.respond_status, 200)
+        self.assertEqual(order[:2], ['create', 'close'])
+        self.assertEqual(wrapper._servers[0], (new_server, None))
+        self.assertEqual(
+            wrapper._configuration['http'][0],
+            {'address': '127.0.0.1', 'port': 8081})
+        mock_save.assert_called_once()
+
+    def test_update_http_server_rolls_back_on_restart_error(self):
+        original = {'address': '127.0.0.1', 'port': 8080}
+        wrapper = self._make_wrapper([dict(original)])
+        token = self._admin_token(wrapper)
+        old_server = Mock()
+        rollback_server = Mock()
+        wrapper._servers = [(old_server, None)]
+
+        with patch.object(wrapper, '_create_http_server',
+                side_effect=[ValueError('bad cert'), (rollback_server, None)]), \
+                patch.object(wrapper, '_save_config') as mock_save:
+            client = self._auth_client(
+                token, method='PUT', path='/api/settings/http/0',
+                data={
+                    'address': '127.0.0.1',
+                    'port': 8080,
+                    'ssl': {'certfile': 'bad.crt', 'keyfile': 'bad.key'},
+                })
+            wrapper._handle_request(client)
+
+        self.assertEqual(client.respond_status, 400)
+        self.assertEqual(client.responded['error'], 'bad cert')
+        old_server.close.assert_called_once()
+        self.assertEqual(wrapper._servers[0], (rollback_server, None))
+        self.assertEqual(wrapper._configuration['http'][0], original)
+        mock_save.assert_not_called()
 
 
 class TestIpFilterValidation(unittest.TestCase):
