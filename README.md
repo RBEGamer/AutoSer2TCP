@@ -88,7 +88,55 @@ docker run --rm \
   ser2tcp
 ```
 
-For a Linux-focused Compose example, see [example/README.md](/Users/marcelochsendorf/Downloads/AutoSer2TCP/example/README.md).
+### Docker Compose example
+
+A Linux-focused Compose example is included in:
+
+- [example/docker-compose.yml](/Users/marcelochsendorf/Downloads/AutoSer2TCP/example/docker-compose.yml)
+- [example/config.yaml](/Users/marcelochsendorf/Downloads/AutoSer2TCP/example/config.yaml)
+- [example/README.md](/Users/marcelochsendorf/Downloads/AutoSer2TCP/example/README.md)
+
+Compose file:
+
+```yaml
+services:
+  ser2tcp:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: ser2tcp
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - /dev:/dev
+    command: ["-v", "-c", "/config/config.yaml"]
+```
+
+Start it:
+
+```bash
+cd example
+docker compose up -d --build
+```
+
+Stop it:
+
+```bash
+cd example
+docker compose down
+```
+
+The included example config:
+
+- exposes the HTTP admin UI on `0.0.0.0:20080`
+- forwards `/dev/ttyUSB0` to TCP `10001`
+- enables a wildcard pool for `/dev/serial/by-id/usb-*` starting at TCP `11000`
+
+This Compose example is intended for Linux because it uses `network_mode: host`
+and mounts `/dev` so serial devices and `/dev/serial/by-id/...` symlinks are
+available inside the container.
 
 ### Uninstall
 
@@ -582,22 +630,9 @@ This is the simplest Linux autostart setup for a desktop or single-user system.
 
 ### Linux - Docker Compose autostart
 
-If you prefer to run `ser2tcp` in a container on Linux, an example stack is
-included in [example/docker-compose.yml](/Users/marcelochsendorf/Downloads/AutoSer2TCP/example/docker-compose.yml).
-
-Start it:
-
-```bash
-cd example
-docker compose up -d --build
-```
-
-Stop it:
-
-```bash
-cd example
-docker compose down
-```
+If you prefer to run `ser2tcp` in a container on Linux, use the Compose example
+described above in **Docker Compose example** and in
+[example/README.md](/Users/marcelochsendorf/Downloads/AutoSer2TCP/example/README.md).
 
 Notes:
 
