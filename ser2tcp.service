@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/ser2tcp
+ExecStart=%h/.local/bin/autoserial2tcp
 
 [Install]
 WantedBy=default.target

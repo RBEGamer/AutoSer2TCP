@@ -10,7 +10,7 @@
     <array>
         <string>/bin/zsh</string>
         <string>-lc</string>
-        <string>exec ser2tcp -v -c "$HOME/.config/ser2tcp/config.yaml"</string>
+        <string>exec autoserial2tcp -v -c "$HOME/.config/ser2tcp/config.yaml"</string>
     </array>
 
     <key>RunAtLoad</key>

@@ -15,12 +15,19 @@ import ser2tcp.pool_manager as _pool_manager
 import ser2tcp.serial_proxy as _serial_proxy
 import ser2tcp.server_manager as _server_manager
 
-try:
-    _about = _metadata.metadata("ser2tcp")
+_about = None
+for _dist_name in ("autoserial2tcp", "ser2tcp"):
+    try:
+        _about = _metadata.metadata(_dist_name)
+        break
+    except _metadata.PackageNotFoundError:
+        continue
+
+if _about is not None:
     VERSION_STR = "%s %s (%s)" % (
         _about["Name"], _about["Version"], _about["Author-email"])
-except _metadata.PackageNotFoundError:
-    VERSION_STR = "ser2tcp (not installed)"
+else:
+    VERSION_STR = "autoserial2tcp (not installed)"
 
 DESCRIPTION_STR = VERSION_STR + """
 (c) 2016-2026 by pavel.revak@gmail.com

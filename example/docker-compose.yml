@@ -1,9 +1,9 @@
 services:
-  ser2tcp:
+  autoserial2tcp:
     build:
       context: ..
       dockerfile: Dockerfile
-    container_name: ser2tcp
+    container_name: autoserial2tcp
     restart: unless-stopped
     network_mode: host
     privileged: true

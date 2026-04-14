@@ -15,5 +15,5 @@ RUN mkdir -p /config
 
 VOLUME ["/config"]
 
-ENTRYPOINT ["ser2tcp"]
+ENTRYPOINT ["autoserial2tcp"]
 CMD ["-v", "-c", "/config/config.yaml"]

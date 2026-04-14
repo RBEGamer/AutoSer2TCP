@@ -6,7 +6,7 @@ under `/dev`, including `/dev/serial/by-id/...`.
 ## Files
 
 - `docker-compose.yml`: example Compose stack
-- `config.yaml`: example `ser2tcp` configuration
+- `config.yaml`: example `autoserial2tcp` configuration
 
 ## What it does
 

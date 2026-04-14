@@ -13,5 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Show Docker info
+        run: docker info
+
       - name: Build Docker image
         run: docker build --tag autoserial2tcp:ci .
