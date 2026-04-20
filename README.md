@@ -22,7 +22,7 @@ https://github.com/cortexm/ser2tcp
 - IP filtering with allow/deny lists (CIDR notation supported)
 - built-in HTTP server with REST API for status monitoring
 - web interface for viewing configured ports and connections
-- web terminal clients (xterm.js VT100 terminal, raw colored view, and browser Web Serial terminal)
+- web terminal clients (xterm.js VT100 terminal, raw colored view, and WebSocket tunnel terminal with endpoint selector)
 - authentication with session management and API tokens
 - light/dark mode web UI (follows system preference)
 
@@ -331,7 +331,7 @@ control:
 - Signal state sent automatically on connect, then only on change
 - Auth: per-server `token`, global user session, or both accepted
 - Web terminals available at `/xterm/<endpoint>` (VT100) and `/raw/<endpoint>` (colored hex)
-- Browser Web Serial terminal available at `/webserial.html` (direct browser-to-serial access via Web Serial API)
+- Tunnel terminal available at `/webserial.html` — fetches all configured WebSocket endpoints and lets the user select and connect to one via WebSocket through the server
 
 #### Socket configuration
 
@@ -535,7 +535,7 @@ http:
 | DELETE | `/api/settings/http/<index>` | admin | Delete HTTP server |
 | GET | `/xterm/<endpoint>` | no | WebSocket VT100 terminal |
 | GET | `/raw/<endpoint>` | no | WebSocket raw terminal |
-| GET | `/webserial.html` | no | Browser Web Serial terminal |
+| GET | `/webserial.html` | no | WebSocket tunnel terminal (endpoint selector) |
 
 Auth levels: `no` = public, `yes` = any authenticated user, `admin` = admin user/token only.
 

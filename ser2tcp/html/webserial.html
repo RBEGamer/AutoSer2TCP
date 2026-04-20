@@ -3,28 +3,48 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ser2tcp Web Serial</title>
+<title>ser2tcp tunnel terminal</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.min.css">
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #1e1e1e; color: #ccc; font-family: sans-serif;
   display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
-.toolbar { display: flex; align-items: center; gap: 0.6em; flex-wrap: wrap;
-  padding: 0.4em 0.8em; background: #2d2d2d; border-bottom: 1px solid #444; }
-.toolbar a { color: #4a9eff; text-decoration: none; }
+
+.toolbar { display: flex; align-items: center; gap: 0.8em;
+  padding: 0.4em 0.8em; background: #2d2d2d; border-bottom: 1px solid #444;
+  flex-shrink: 0; flex-wrap: wrap; }
+.toolbar a { color: #4a9eff; text-decoration: none; font-size: 0.85em; }
 .toolbar a:hover { text-decoration: underline; }
-.toolbar button, .toolbar select, .toolbar input {
-  background: #383838; color: #ccc; border: 1px solid #555;
-  border-radius: 4px; font-size: 0.85em;
-}
-.toolbar button, .toolbar select { padding: 0.3em 0.7em; }
-.toolbar input { width: 6em; padding: 0.3em 0.5em; }
-.toolbar button { cursor: pointer; }
+.toolbar button { padding: 0.3em 0.8em; border: 1px solid #555;
+  border-radius: 4px; cursor: pointer; font-size: 0.85em;
+  background: #383838; color: #ccc; }
+.toolbar button:hover { background: #444; }
 .toolbar button:disabled { opacity: 0.55; cursor: not-allowed; }
-.status { font-size: 0.85em; margin-left: auto; }
-.status-on { color: #4c4; }
-.status-off { color: #aaa; }
-#terminal-container { flex: 1; min-height: 0; }
+.toolbar select { padding: 0.3em 0.6em; background: #383838; color: #ccc;
+  border: 1px solid #555; border-radius: 4px; font-size: 0.85em; max-width: 22em; }
+.toolbar select:disabled { opacity: 0.55; }
+.btn-connect { background: #4c4 !important; color: #fff !important; border-color: #4c4 !important; }
+.btn-connect:hover { background: #3b3 !important; }
+.btn-disconnect { background: #e55 !important; color: #fff !important; border-color: #e55 !important; }
+.btn-disconnect:hover { background: #d44 !important; }
+.spacer { flex: 1; }
+.status { font-size: 0.85em; white-space: nowrap; }
+.dot { font-size: 1.2em; vertical-align: middle; }
+.dot-on { color: #4c4; }
+.dot-off { color: #666; }
+
+.signal-bar { display: flex; align-items: center; gap: 0.4em;
+  padding: 0.3em 0.8em; background: #252525; border-bottom: 1px solid #333;
+  flex-shrink: 0; }
+.signal-bar.hidden { display: none; }
+.signal-badge { display: inline-block; padding: 0.1em 0.4em; border-radius: 3px;
+  font-size: 0.75em; font-weight: bold; font-family: monospace; }
+.signal-on { background: #4c4; color: #fff; }
+.signal-off { background: #444; color: #666; }
+.signal-click { cursor: pointer; }
+.signal-click:hover { opacity: 0.8; }
+
+#terminal-container { flex: 1; overflow: hidden; }
 #terminal-container .xterm { height: 100%; }
 </style>
 </head>
@@ -32,41 +52,24 @@ body { background: #1e1e1e; color: #ccc; font-family: sans-serif;
 
 <div class="toolbar">
   <a href="/">&larr; Ports</a>
-  <button id="btn-select">Select Port</button>
-  <label>Baud <input id="baudrate" type="number" min="1" value="115200"></label>
-  <label>Data
-    <select id="data-bits">
-      <option value="8" selected>8</option>
-      <option value="7">7</option>
-      <option value="6">6</option>
-      <option value="5">5</option>
-    </select>
-  </label>
-  <label>Parity
-    <select id="parity">
-      <option value="none" selected>none</option>
-      <option value="even">even</option>
-      <option value="odd">odd</option>
-    </select>
-  </label>
-  <label>Stop
-    <select id="stop-bits">
-      <option value="1" selected>1</option>
-      <option value="2">2</option>
-    </select>
-  </label>
-  <button id="btn-connect">Connect</button>
-  <button id="btn-disconnect" disabled>Disconnect</button>
+  <select id="endpoint-select" title="Select a serial port tunnel"></select>
+  <span class="spacer"></span>
+  <span class="status" id="status">
+    <span class="dot dot-off">&#x25cf;</span> Disconnected
+  </span>
   <button id="btn-clear">Clear</button>
-  <span id="status" class="status status-off">Disconnected</span>
+  <button id="btn-connect" class="btn-connect">Connect</button>
 </div>
 
+<div class="signal-bar hidden" id="signal-bar"></div>
 <div id="terminal-container"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
+const token = localStorage.getItem('ser2tcp_token');
+
 const term = new Terminal({
   cursorBlink: true,
   scrollback: 10000,
@@ -84,120 +87,154 @@ term.open($('terminal-container'));
 fitAddon.fit();
 window.addEventListener('resize', () => fitAddon.fit());
 
-let serialPort = null;
-let reader = null;
-let writer = null;
-let readLoopTask = null;
+let ws = null;
+let signals = {};
 
-function setStatus(text, connected) {
-  const status = $('status');
-  status.textContent = text;
-  status.classList.toggle('status-on', !!connected);
-  status.classList.toggle('status-off', !connected);
-  $('btn-connect').disabled = connected || !serialPort;
-  $('btn-disconnect').disabled = !connected;
-  $('btn-select').disabled = connected;
-}
+// --- Status / UI helpers ---
 
-async function selectPort() {
-  try {
-    serialPort = await navigator.serial.requestPort();
-    setStatus('Port selected', false);
-  } catch (err) {
-    if (err && err.name !== 'NotFoundError')
-      setStatus('Select failed: ' + err.message, false);
+function updateStatus(connected) {
+  const el = $('status');
+  if (connected) {
+    el.innerHTML = '<span class="dot dot-on">&#x25cf;</span> Connected';
+    $('btn-connect').textContent = 'Disconnect';
+    $('btn-connect').className = 'btn-disconnect';
+    $('btn-connect').onclick = disconnect;
+    $('endpoint-select').disabled = true;
+  } else {
+    el.innerHTML = '<span class="dot dot-off">&#x25cf;</span> Disconnected';
+    $('btn-connect').textContent = 'Connect';
+    $('btn-connect').className = 'btn-connect';
+    $('btn-connect').onclick = connect;
+    $('endpoint-select').disabled = false;
   }
 }
 
-async function readLoop() {
-  try {
-    while (serialPort && serialPort.readable) {
-      reader = serialPort.readable.getReader();
-      while (true) {
-        const {value, done} = await reader.read();
-        if (done) break;
-        if (value) term.write(value);
+function renderSignals() {
+  const bar = $('signal-bar');
+  const names = Object.keys(signals);
+  if (!names.length) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');
+  bar.innerHTML = '';
+  names.forEach(sig => {
+    const on = signals[sig];
+    const clickable = sig === 'rts' || sig === 'dtr';
+    const badge = document.createElement('span');
+    badge.textContent = sig.toUpperCase();
+    badge.className = 'signal-badge ' + (on ? 'signal-on' : 'signal-off')
+      + (clickable ? ' signal-click' : '');
+    if (clickable) {
+      badge.title = sig.toUpperCase() + ': click to toggle';
+      badge.onclick = () => {
+        if (ws && ws.readyState === WebSocket.OPEN)
+          ws.send(JSON.stringify({[sig]: !on}));
+      };
+    }
+    bar.appendChild(badge);
+  });
+}
+
+// --- Endpoint loading ---
+
+function loadEndpoints() {
+  const sel = $('endpoint-select');
+  sel.innerHTML = '<option value="">Loading\u2026</option>';
+  sel.disabled = true;
+  $('btn-connect').disabled = true;
+
+  const opts = { headers: {}, cache: 'no-store' };
+  if (token) opts.headers['Authorization'] = 'Bearer ' + token;
+  fetch('/api/status', opts)
+    .then(r => r.json())
+    .then(status => {
+      const endpoints = [];
+      (status.ports || []).forEach(port => {
+        const portLabel = port.name || (port.serial && port.serial.port) || 'port';
+        (port.servers || []).forEach(srv => {
+          if (srv.protocol === 'WEBSOCKET' && srv.endpoint && srv.data !== false) {
+            endpoints.push({
+              endpoint: srv.endpoint,
+              label: portLabel + ' \u2014 /ws/' + srv.endpoint,
+            });
+          }
+        });
+      });
+      sel.innerHTML = '';
+      if (!endpoints.length) {
+        sel.innerHTML = '<option value="">No WebSocket ports configured</option>';
+        return;
       }
-      reader.releaseLock();
-      reader = null;
-    }
-  } catch (err) {
-    setStatus('Read error: ' + err.message, false);
-  } finally {
-    if (reader) {
-      try { reader.releaseLock(); } catch {}
-      reader = null;
-    }
-  }
-}
-
-async function connectPort() {
-  if (!serialPort) {
-    setStatus('Select a port first', false);
-    return;
-  }
-  try {
-    await serialPort.open({
-      baudRate: parseInt($('baudrate').value, 10) || 115200,
-      dataBits: parseInt($('data-bits').value, 10),
-      parity: $('parity').value,
-      stopBits: parseInt($('stop-bits').value, 10),
+      endpoints.forEach(e => {
+        const opt = document.createElement('option');
+        opt.value = e.endpoint;
+        opt.textContent = e.label;
+        sel.appendChild(opt);
+      });
+      sel.disabled = false;
+      $('btn-connect').disabled = false;
+      // If endpoint is in query string, pre-select it
+      const params = new URLSearchParams(location.search);
+      const pre = params.get('endpoint');
+      if (pre) sel.value = pre;
+    })
+    .catch(() => {
+      sel.innerHTML = '<option value="">Failed to load ports</option>';
     });
-    writer = serialPort.writable.getWriter();
-    readLoopTask = readLoop();
-    setStatus('Connected', true);
-  } catch (err) {
-    setStatus('Connect failed: ' + err.message, false);
-  }
 }
 
-async function disconnectPort() {
-  try {
-    if (reader) {
-      try { await reader.cancel(); } catch {}
+// --- WebSocket connection ---
+
+function connect() {
+  if (ws) return;
+  const endpoint = $('endpoint-select').value;
+  if (!endpoint) return;
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  let url = scheme + '//' + location.host + '/ws/' + endpoint;
+  if (token) url += '?token=' + encodeURIComponent(token);
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    signals = {};
+    renderSignals();
+    updateStatus(true);
+  };
+  ws.onclose = () => {
+    ws = null;
+    signals = {};
+    renderSignals();
+    updateStatus(false);
+  };
+  ws.onmessage = ev => {
+    if (typeof ev.data === 'string') {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.signals) { signals = msg.signals; renderSignals(); }
+      } catch {}
+      return;
     }
-    if (writer) {
-      writer.releaseLock();
-      writer = null;
-    }
-    if (readLoopTask) await readLoopTask;
-    if (serialPort) await serialPort.close();
-    setStatus('Disconnected', false);
-  } catch (err) {
-    setStatus('Disconnect failed: ' + err.message, false);
-  }
+    term.write(new Uint8Array(ev.data));
+  };
 }
 
-term.onData(async data => {
-  if (!writer) return;
-  try {
-    await writer.write(new TextEncoder().encode(data));
-  } catch (err) {
-    setStatus('Write error: ' + err.message, false);
-  }
+function disconnect() {
+  if (ws) { ws.close(); ws = null; }
+  signals = {};
+  renderSignals();
+  updateStatus(false);
+}
+
+term.onData(data => {
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(new TextEncoder().encode(data));
 });
 
-$('btn-select').onclick = selectPort;
-$('btn-connect').onclick = connectPort;
-$('btn-disconnect').onclick = disconnectPort;
 $('btn-clear').onclick = () => term.clear();
-
-if (!('serial' in navigator)) {
-  setStatus('Web Serial not supported in this browser', false);
-  $('btn-select').disabled = true;
-  $('btn-connect').disabled = true;
-} else {
-  setStatus('Disconnected', false);
-}
+$('btn-connect').onclick = connect;
 
 window.addEventListener('pagehide', () => {
-  if (reader) reader.cancel().catch(() => {});
-  if (writer) {
-    try { writer.releaseLock(); } catch {}
-    writer = null;
-  }
-  if (serialPort) serialPort.close().catch(() => {});
+  if (ws) { try { ws.close(); } catch {} ws = null; }
 });
+
+loadEndpoints();
 </script>
 </body>
 </html>
