@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ser2tcp Web Serial</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.min.css">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #1e1e1e; color: #ccc; font-family: sans-serif;
+  display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+.toolbar { display: flex; align-items: center; gap: 0.6em; flex-wrap: wrap;
+  padding: 0.4em 0.8em; background: #2d2d2d; border-bottom: 1px solid #444; }
+.toolbar a { color: #4a9eff; text-decoration: none; }
+.toolbar a:hover { text-decoration: underline; }
+.toolbar button, .toolbar select, .toolbar input {
+  background: #383838; color: #ccc; border: 1px solid #555;
+  border-radius: 4px; font-size: 0.85em;
+}
+.toolbar button, .toolbar select { padding: 0.3em 0.7em; }
+.toolbar input { width: 6em; padding: 0.3em 0.5em; }
+.toolbar button { cursor: pointer; }
+.toolbar button:disabled { opacity: 0.55; cursor: not-allowed; }
+.status { font-size: 0.85em; margin-left: auto; }
+.status-on { color: #4c4; }
+.status-off { color: #aaa; }
+#terminal-container { flex: 1; min-height: 0; }
+#terminal-container .xterm { height: 100%; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <a href="/">&larr; Ports</a>
+  <button id="btn-select">Select Port</button>
+  <label>Baud <input id="baudrate" type="number" min="1" value="115200"></label>
+  <label>Data
+    <select id="data-bits">
+      <option value="8" selected>8</option>
+      <option value="7">7</option>
+      <option value="6">6</option>
+      <option value="5">5</option>
+    </select>
+  </label>
+  <label>Parity
+    <select id="parity">
+      <option value="none" selected>none</option>
+      <option value="even">even</option>
+      <option value="odd">odd</option>
+    </select>
+  </label>
+  <label>Stop
+    <select id="stop-bits">
+      <option value="1" selected>1</option>
+      <option value="2">2</option>
+    </select>
+  </label>
+  <button id="btn-connect">Connect</button>
+  <button id="btn-disconnect" disabled>Disconnect</button>
+  <button id="btn-clear">Clear</button>
+  <span id="status" class="status status-off">Disconnected</span>
+</div>
+
+<div id="terminal-container"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0/lib/addon-fit.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const term = new Terminal({
+  cursorBlink: true,
+  scrollback: 10000,
+  fontSize: 14,
+  theme: {
+    background: '#1e1e1e',
+    foreground: '#cccccc',
+    cursor: '#cccccc',
+    selectionBackground: '#264f78',
+  },
+});
+const fitAddon = new FitAddon.FitAddon();
+term.loadAddon(fitAddon);
+term.open($('terminal-container'));
+fitAddon.fit();
+window.addEventListener('resize', () => fitAddon.fit());
+
+let serialPort = null;
+let reader = null;
+let writer = null;
+let readLoopTask = null;
+
+function setStatus(text, connected) {
+  const status = $('status');
+  status.textContent = text;
+  status.classList.toggle('status-on', !!connected);
+  status.classList.toggle('status-off', !connected);
+  $('btn-connect').disabled = connected || !serialPort;
+  $('btn-disconnect').disabled = !connected;
+  $('btn-select').disabled = connected;
+}
+
+async function selectPort() {
+  try {
+    serialPort = await navigator.serial.requestPort();
+    setStatus('Port selected', false);
+  } catch (err) {
+    if (err && err.name !== 'NotFoundError')
+      setStatus('Select failed: ' + err.message, false);
+  }
+}
+
+async function readLoop() {
+  try {
+    while (serialPort && serialPort.readable) {
+      reader = serialPort.readable.getReader();
+      while (true) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        if (value) term.write(value);
+      }
+      reader.releaseLock();
+      reader = null;
+    }
+  } catch (err) {
+    setStatus('Read error: ' + err.message, false);
+  } finally {
+    if (reader) {
+      try { reader.releaseLock(); } catch {}
+      reader = null;
+    }
+  }
+}
+
+async function connectPort() {
+  if (!serialPort) {
+    setStatus('Select a port first', false);
+    return;
+  }
+  try {
+    await serialPort.open({
+      baudRate: parseInt($('baudrate').value, 10) || 115200,
+      dataBits: parseInt($('data-bits').value, 10),
+      parity: $('parity').value,
+      stopBits: parseInt($('stop-bits').value, 10),
+    });
+    writer = serialPort.writable.getWriter();
+    readLoopTask = readLoop();
+    setStatus('Connected', true);
+  } catch (err) {
+    setStatus('Connect failed: ' + err.message, false);
+  }
+}
+
+async function disconnectPort() {
+  try {
+    if (reader) {
+      try { await reader.cancel(); } catch {}
+    }
+    if (writer) {
+      writer.releaseLock();
+      writer = null;
+    }
+    if (readLoopTask) await readLoopTask;
+    if (serialPort) await serialPort.close();
+    setStatus('Disconnected', false);
+  } catch (err) {
+    setStatus('Disconnect failed: ' + err.message, false);
+  }
+}
+
+term.onData(async data => {
+  if (!writer) return;
+  try {
+    await writer.write(new TextEncoder().encode(data));
+  } catch (err) {
+    setStatus('Write error: ' + err.message, false);
+  }
+});
+
+$('btn-select').onclick = selectPort;
+$('btn-connect').onclick = connectPort;
+$('btn-disconnect').onclick = disconnectPort;
+$('btn-clear').onclick = () => term.clear();
+
+if (!('serial' in navigator)) {
+  setStatus('Web Serial not supported in this browser', false);
+  $('btn-select').disabled = true;
+  $('btn-connect').disabled = true;
+} else {
+  setStatus('Disconnected', false);
+}
+
+window.addEventListener('beforeunload', () => { disconnectPort(); });
+</script>
+</body>
+</html>
