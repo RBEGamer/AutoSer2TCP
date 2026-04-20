@@ -106,6 +106,9 @@ h1 { color: var(--text); margin: 0; font-size: 1.4em; font-weight: 600; }
   box-shadow: 0 1px 3px var(--shadow); }
 .topbar-left { display: flex; align-items: center; gap: 1.5em; }
 .topbar-right { display: flex; align-items: center; }
+.topbar-link { color: var(--text-secondary); text-decoration: none;
+  font-size: 0.85em; margin-right: 0.8em; }
+.topbar-link:hover { color: var(--accent); text-decoration: underline; }
 .topbar-title { font-weight: 700; font-size: 1em; color: var(--text);
   letter-spacing: -0.02em; }
 .topbar nav { display: flex; gap: 0; }

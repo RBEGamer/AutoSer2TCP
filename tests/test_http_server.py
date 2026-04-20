@@ -82,6 +82,14 @@ class TestRouting(unittest.TestCase):
         self.assertEqual(client.responded[0], 'file')
         self.assertTrue(client.responded[1].endswith('index.html'))
 
+    def test_static_webserial(self):
+        wrapper = make_wrapper()
+        client = MockClient(path='/webserial.html')
+        wrapper._handle_request(client)
+        self.assertEqual(client.respond_status, 200)
+        self.assertEqual(client.responded[0], 'file')
+        self.assertTrue(client.responded[1].endswith('webserial.html'))
+
     def test_static_not_found(self):
         wrapper = make_wrapper()
         client = MockClient(path='/nonexistent.html')
