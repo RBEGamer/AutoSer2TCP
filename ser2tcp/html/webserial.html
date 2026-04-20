@@ -64,7 +64,7 @@ body { background: #1e1e1e; color: #ccc; font-family: sans-serif;
 <div id="terminal-container"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const term = new Terminal({
@@ -190,7 +190,14 @@ if (!('serial' in navigator)) {
   setStatus('Disconnected', false);
 }
 
-window.addEventListener('beforeunload', () => { disconnectPort(); });
+window.addEventListener('pagehide', () => {
+  if (reader) reader.cancel().catch(() => {});
+  if (writer) {
+    try { writer.releaseLock(); } catch {}
+    writer = null;
+  }
+  if (serialPort) serialPort.close().catch(() => {});
+});
 </script>
 </body>
 </html>
