@@ -250,6 +250,7 @@ class HttpServerWrapper():
         for server, _ in self._servers:
             server.close()
         for item in list(self._terminal_ws_servers.values()):
+            item['proxy'].detach_runtime_server(item['server'])
             item['server'].close()
         self._terminal_ws_servers.clear()
 
@@ -313,14 +314,17 @@ class HttpServerWrapper():
                 next_servers[endpoint] = current
                 continue
             if current:
+                current['proxy'].detach_runtime_server(current['server'])
                 current['server'].close()
             next_servers[endpoint] = {
                 'proxy': proxy,
                 'server': _server_websocket.ServerWebSocket(
                     self._terminal_server_config(endpoint), proxy, self._log),
             }
+            proxy.attach_runtime_server(next_servers[endpoint]['server'])
         for endpoint, current in list(self._terminal_ws_servers.items()):
             if endpoint not in next_servers:
+                current['proxy'].detach_runtime_server(current['server'])
                 current['server'].close()
         self._terminal_ws_servers = next_servers
 

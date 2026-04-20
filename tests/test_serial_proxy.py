@@ -12,6 +12,7 @@ from ser2tcp.serial_proxy import SerialProxy
 def _mock_init(self, config=None, log=None):
     """Mock init that sets required attributes for __del__"""
     self._servers = []
+    self._runtime_servers = []
     self._serial = None
     self._reader_thread = None
     self._reader_sock_r = None
@@ -293,6 +294,58 @@ class TestSerialWriteErrors(unittest.TestCase):
         for server in proxy._servers:
             server.close_connections.assert_called_once()
         proxy.disconnect.assert_called_once()
+
+
+class TestRuntimeServers(unittest.TestCase):
+    """Test transient servers used by the HTTP tunnel terminal."""
+
+    def _make_proxy(self):
+        proxy = SerialProxy.__new__(SerialProxy)
+        _mock_init(proxy)
+        proxy._log = MagicMock()
+        proxy._serial_config = {'port': '/dev/ttyUSB0'}
+        proxy._last_signals = 0
+        proxy._last_signal_poll = 0
+        proxy._signal_poll_interval = 0.1
+        proxy._has_control_servers = False
+        proxy._name = ''
+        proxy._match = None
+        proxy._max_connections = 1
+        return proxy
+
+    def test_runtime_server_receives_serial_data(self):
+        proxy = self._make_proxy()
+        configured = MagicMock()
+        configured.control = None
+        runtime = MagicMock()
+        runtime.control = None
+        configured.connections = []
+        runtime.connections = []
+        proxy._servers = [configured]
+        proxy.attach_runtime_server(runtime)
+        proxy.send_to_connections(b'hello')
+        configured.send.assert_called_once_with(b'hello')
+        runtime.send.assert_called_once_with(b'hello')
+
+    def test_runtime_server_counts_for_limits_and_signals(self):
+        proxy = self._make_proxy()
+        proxy._serial = MagicMock()
+        proxy._serial.rts = True
+        proxy._serial.dtr = False
+        proxy._serial.cts = False
+        proxy._serial.dsr = False
+        proxy._serial.ri = False
+        proxy._serial.cd = False
+        runtime = MagicMock()
+        runtime.control = {'signals': ['rts'], 'poll_interval': 0}
+        runtime.connections = [Mock()]
+        runtime.has_connections.return_value = True
+        proxy.attach_runtime_server(runtime)
+        self.assertTrue(proxy.has_connections())
+        self.assertEqual(proxy.total_connections(), 1)
+        self.assertFalse(proxy.can_add_connection())
+        proxy.process_signals()
+        runtime.send_signal_report.assert_called_once()
 
 
 class TestSignalControl(unittest.TestCase):

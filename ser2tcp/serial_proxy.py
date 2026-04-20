@@ -45,6 +45,7 @@ class SerialProxy():
         self._reader_sock_w = None
         self._reader_running = False
         self._servers = []
+        self._runtime_servers = []
         self._last_signals = 0
         self._last_signal_poll = 0
         self._signal_poll_interval = 0.1
@@ -76,6 +77,7 @@ class SerialProxy():
                 interval = server.control.get('poll_interval')
                 if interval is not None:
                     self._signal_poll_interval = interval
+        self._update_control_polling()
 
     def _init_serial_config(self, config):
         """Initialize serial configuration - validate and convert enum values"""
@@ -223,14 +225,14 @@ class SerialProxy():
 
     def has_connections(self):
         """Check if there are any active connections"""
-        for server in self._servers:
+        for server in self._all_servers():
             if server.has_connections():
                 return True
         return False
 
     def total_connections(self):
         """Return total number of connections across all servers"""
-        return sum(len(server.connections) for server in self._servers)
+        return sum(len(server.connections) for server in self._all_servers())
 
     def can_add_connection(self):
         """Check if new connection can be added (port-level limit)"""
@@ -253,12 +255,14 @@ class SerialProxy():
         """Close socket and all connections"""
         while self._servers:
             self._servers.pop().close()
+        while self._runtime_servers:
+            self._runtime_servers.pop().close()
         self.disconnect()
 
     def read_sockets(self):
         """Return all sockets for reading"""
         sockets = []
-        for server in self._servers:
+        for server in self._all_servers():
             sockets += server.read_sockets()
         if self._serial:
             if self._reader_sock_r:
@@ -270,13 +274,13 @@ class SerialProxy():
     def write_sockets(self):
         """Return all sockets for writing (with pending data)"""
         sockets = []
-        for server in self._servers:
+        for server in self._all_servers():
             sockets += server.write_sockets()
         return sockets
 
     def send_to_connections(self, data):
         """Send data to all connections"""
-        for server in self._servers:
+        for server in self._all_servers():
             server.send(data)
 
     def _process_serial_data(self):
@@ -297,13 +301,13 @@ class SerialProxy():
     def _handle_serial_error(self, err):
         """Cleanup after serial I/O failure without stopping the process"""
         self._log.warning(err)
-        for server in self._servers:
+        for server in self._all_servers():
             server.close_connections()
         self.disconnect()
 
     def process_read(self, read_sockets):
         """Process sockets with read event"""
-        for server in self._servers:
+        for server in self._all_servers():
             server.process_read(read_sockets)
         serial_sock = self._reader_sock_r or self._serial
         if self._serial and serial_sock in read_sockets:
@@ -311,12 +315,12 @@ class SerialProxy():
 
     def process_write(self, write_sockets):
         """Process sockets with write event"""
-        for server in self._servers:
+        for server in self._all_servers():
             server.process_write(write_sockets)
 
     def process_stale(self):
         """Remove stale connections"""
-        for server in self._servers:
+        for server in self._all_servers():
             server.process_stale()
         self.process_signals()
 
@@ -357,7 +361,7 @@ class SerialProxy():
     def _broadcast_signals(self):
         """Broadcast signal report to all control-enabled servers"""
         bitmask = self.get_signals()
-        for server in self._servers:
+        for server in self._all_servers():
             server.send_signal_report(bitmask)
         self._last_signals = bitmask
 
@@ -372,7 +376,7 @@ class SerialProxy():
         bitmask = self.get_signals()
         if bitmask != self._last_signals:
             self._last_signals = bitmask
-            for server in self._servers:
+            for server in self._all_servers():
                 server.send_signal_report(bitmask)
 
     def send(self, data):
@@ -382,3 +386,37 @@ class SerialProxy():
                 self._serial.write(data)
             except (OSError, _serial.SerialException) as err:
                 self._handle_serial_error(err)
+
+    def attach_runtime_server(self, server):
+        """Attach transient server used by the HTTP tunnel terminal."""
+        if server not in self._runtime_servers:
+            self._runtime_servers.append(server)
+            self._update_control_polling()
+
+    def detach_runtime_server(self, server):
+        """Detach transient server used by the HTTP tunnel terminal."""
+        if server in self._runtime_servers:
+            self._runtime_servers.remove(server)
+            self._update_control_polling()
+
+    def _all_servers(self):
+        """Return configured and transient servers."""
+        return self._servers + self._runtime_servers
+
+    def _update_control_polling(self):
+        """Recompute whether signal polling is needed across all servers."""
+        self._has_control_servers = False
+        self._signal_poll_interval = 0.1
+        min_interval = None
+        for server in self._all_servers():
+            if not server.control:
+                continue
+            self._has_control_servers = True
+            interval = server.control.get('poll_interval')
+            if interval is not None:
+                if min_interval is None:
+                    min_interval = interval
+                else:
+                    min_interval = min(min_interval, interval)
+        if min_interval is not None:
+            self._signal_poll_interval = min_interval
