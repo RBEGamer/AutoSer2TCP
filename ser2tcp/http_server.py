@@ -17,6 +17,7 @@ import ser2tcp.ip_filter as _ip_filter
 import ser2tcp.pool_manager as _pool_manager
 import ser2tcp.serial_proxy as _serial_proxy
 import ser2tcp.server as _server
+import ser2tcp.server_websocket as _server_websocket
 
 HTML_DIR = _pathlib.Path(__file__).parent / 'html'
 
@@ -53,6 +54,7 @@ class HttpServerWrapper():
                     break
         self._auth = _http_auth.SessionManager(auth_config) if auth_config else None
         self._ws_clients = {}  # uhttp client -> ServerWebSocket
+        self._terminal_ws_servers = {}
         self._servers = []  # list of (HttpServer, IpFilter or None)
         self._pending_reload = False
         for config in configs:
@@ -240,11 +242,16 @@ class HttpServerWrapper():
         if self._pending_reload:
             self._pending_reload = False
             self.reload_http_servers()
+        for item in list(self._terminal_ws_servers.values()):
+            item['server'].process_stale()
 
     def close(self):
         """Close all HTTP servers"""
         for server, _ in self._servers:
             server.close()
+        for item in list(self._terminal_ws_servers.values()):
+            item['server'].close()
+        self._terminal_ws_servers.clear()
 
     def _get_ws_endpoints(self):
         """Build mapping of endpoint name -> ServerWebSocket"""
@@ -253,7 +260,100 @@ class HttpServerWrapper():
             for server in proxy.servers:
                 if server.protocol == 'WEBSOCKET':
                     endpoints[server.endpoint] = server
+        for target in self._get_terminal_targets():
+            endpoints[target['endpoint']] = self._terminal_ws_servers[
+                target['endpoint']]['server']
         return endpoints
+
+    def _get_terminal_targets(self):
+        """Return web terminal targets backed by managed serial proxies."""
+        targets = []
+        for index, proxy in enumerate(self._serial_proxies):
+            endpoint = f'__terminal-port-{index}'
+            targets.append({
+                'endpoint': endpoint,
+                'label': self._format_terminal_label(proxy, index),
+                'kind': 'port',
+                'port_index': index,
+                'connected': bool(proxy.is_connected),
+                'proxy': proxy,
+            })
+        if self._pool_manager:
+            terminal_targets = getattr(self._pool_manager, 'terminal_targets', None)
+            if callable(terminal_targets):
+                for target in terminal_targets():
+                    proxy = target['proxy']
+                    endpoint = (
+                        f"__terminal-pool-{target['pool_index']}"
+                        f"-{target['assignment_index']}"
+                    )
+                    targets.append({
+                        'endpoint': endpoint,
+                        'label': self._format_pool_terminal_label(target),
+                        'kind': 'pool-assignment',
+                        'pool_index': target['pool_index'],
+                        'assignment_index': target['assignment_index'],
+                        'connected': bool(proxy.is_connected),
+                        'proxy': proxy,
+                    })
+        self._sync_terminal_ws_servers(targets)
+        for target in targets:
+            target['ws_path'] = '/ws/' + target['endpoint']
+            target.pop('proxy', None)
+        return targets
+
+    def _sync_terminal_ws_servers(self, targets):
+        """Keep managed terminal WebSocket endpoints aligned with live proxies."""
+        next_servers = {}
+        for target in targets:
+            endpoint = target['endpoint']
+            proxy = target['proxy']
+            current = self._terminal_ws_servers.get(endpoint)
+            if current and current['proxy'] is proxy:
+                next_servers[endpoint] = current
+                continue
+            if current:
+                current['server'].close()
+            next_servers[endpoint] = {
+                'proxy': proxy,
+                'server': _server_websocket.ServerWebSocket(
+                    self._terminal_server_config(endpoint), proxy, self._log),
+            }
+        for endpoint, current in list(self._terminal_ws_servers.items()):
+            if endpoint not in next_servers:
+                current['server'].close()
+        self._terminal_ws_servers = next_servers
+
+    def _terminal_server_config(self, endpoint):
+        """Return WebSocket tunnel config for one managed terminal target."""
+        return {
+            'protocol': 'websocket',
+            'endpoint': endpoint,
+            'control': {
+                'rts': True,
+                'dtr': True,
+                'signals': list(_control.SIGNAL_NAMES),
+            },
+        }
+
+    def _format_terminal_label(self, proxy, index):
+        """Return dropdown label for one static serial proxy."""
+        serial_cfg = proxy.serial_config
+        name = proxy.name or serial_cfg.get('port')
+        if not name and proxy.match:
+            name = 'match: ' + ', '.join(
+                f'{key}={value}' for key, value in proxy.match.items())
+        if not name:
+            name = f'Port {index}'
+        return name
+
+    def _format_pool_terminal_label(self, target):
+        """Return dropdown label for one active pool assignment."""
+        name = target.get('name') or target.get('identity') or 'assignment'
+        pool_name = target.get('pool_name')
+        if pool_name:
+            return f'{pool_name} - {name}'
+        return name
 
     def _handle_ws_upgrade(self, client):
         """Handle WebSocket upgrade request"""
@@ -380,6 +480,8 @@ class HttpServerWrapper():
             return
         if client.method == 'GET' and client.path == '/api/status':
             self._handle_api_status(client, user)
+        elif client.method == 'GET' and client.path == '/api/terminal-targets':
+            self._handle_api_terminal_targets(client)
         elif client.method == 'GET' and client.path == '/api/detect':
             self._handle_api_detect(client)
         elif client.path == '/api/ports':
@@ -540,6 +642,10 @@ class HttpServerWrapper():
         is_admin = user.get('admin', False) if user else False
         pools = self._pool_manager.status() if self._pool_manager else []
         client.respond({'ports': ports, 'pools': pools, 'admin': is_admin})
+
+    def _handle_api_terminal_targets(self, client):
+        """Return managed serial targets for the tunnel terminal page."""
+        client.respond(self._get_terminal_targets())
 
     def _handle_api_detect(self, client):
         """Return list of available serial ports"""

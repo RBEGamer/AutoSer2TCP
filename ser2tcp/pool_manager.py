@@ -145,6 +145,26 @@ class PoolRuntime():
             'assignments': assignments,
         }
 
+    def active_terminal_targets(self):
+        """Return active assignment proxies for web terminal tunneling."""
+        targets = []
+        assignments = self._config.get('assignments', [])
+        for index, assignment in enumerate(assignments):
+            identity = assignment.get('identity')
+            proxy = self._active.get(identity)
+            if proxy is None:
+                continue
+            targets.append({
+                'pool_index': self._index,
+                'assignment_index': index,
+                'identity': identity,
+                'name': assignment.get('name'),
+                'pool_name': self._config.get('name'),
+                'port': assignment.get('port'),
+                'proxy': proxy,
+            })
+        return targets
+
     def add_assignment(self, identity, name=None, enabled=True):
         """Add explicit assignment."""
         if not _fnmatch.fnmatch(identity, self._glob_pattern()):
@@ -420,3 +440,10 @@ class PoolManager():
         if pool_index < 0 or pool_index >= len(self._pools):
             raise PoolValidationError('Pool not found')
         self._pools[pool_index].remove_assignment(assignment_index)
+
+    def terminal_targets(self):
+        """Return active assignment proxies for the web terminal."""
+        targets = []
+        for pool in self._pools:
+            targets.extend(pool.active_terminal_targets())
+        return targets

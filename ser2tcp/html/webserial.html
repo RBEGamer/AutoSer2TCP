@@ -143,30 +143,19 @@ function loadEndpoints() {
 
   const opts = { headers: {}, cache: 'no-store' };
   if (token) opts.headers['Authorization'] = 'Bearer ' + token;
-  fetch('/api/status', opts)
-    .then(r => r.json())
-    .then(status => {
-      const endpoints = [];
-      (status.ports || []).forEach(port => {
-        const portLabel = port.name || (port.serial && port.serial.port) || 'port';
-        (port.servers || []).forEach(srv => {
-          if (srv.protocol === 'WEBSOCKET' && srv.endpoint && srv.data !== false) {
-            endpoints.push({
-              endpoint: srv.endpoint,
-              label: portLabel + ' \u2014 /ws/' + srv.endpoint,
-            });
-          }
-        });
-      });
+  fetch('/api/terminal-targets', opts)
+    .then(r => r.ok ? r.json() : Promise.reject(new Error('load failed')))
+    .then(endpoints => {
+      if (!Array.isArray(endpoints)) endpoints = [];
       sel.innerHTML = '';
       if (!endpoints.length) {
-        sel.innerHTML = '<option value="">No WebSocket ports configured</option>';
+        sel.innerHTML = '<option value="">No serial ports available</option>';
         return;
       }
       endpoints.forEach(e => {
         const opt = document.createElement('option');
         opt.value = e.endpoint;
-        opt.textContent = e.label;
+        opt.textContent = e.label || e.endpoint;
         sel.appendChild(opt);
       });
       sel.disabled = false;

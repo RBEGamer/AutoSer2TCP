@@ -68,6 +68,12 @@ class TestRouting(unittest.TestCase):
             wrapper._handle_request(client)
         self.assertEqual(client.respond_status, 200)
 
+    def test_api_terminal_targets_no_auth(self):
+        wrapper = make_wrapper()
+        client = MockClient(path='/api/terminal-targets')
+        wrapper._handle_request(client)
+        self.assertEqual(client.respond_status, 200)
+
     def test_api_unknown_returns_404(self):
         wrapper = make_wrapper()
         client = MockClient(path='/api/unknown')
@@ -384,6 +390,71 @@ class TestApiStatus(unittest.TestCase):
         client = MockClient(path='/api/status')
         wrapper._handle_request(client)
         self.assertEqual(client.responded['pools'], pools)
+
+
+class TestApiTerminalTargets(unittest.TestCase):
+    def _make_proxy(self, port='/dev/ttyUSB0', name='', match=None,
+            connected=False, servers=None):
+        proxy = Mock()
+        proxy.serial_config = {}
+        if port is not None:
+            proxy.serial_config['port'] = port
+        proxy.name = name
+        proxy.match = match
+        proxy.is_connected = connected
+        proxy.servers = servers or []
+        return proxy
+
+    def test_static_port_target_listed(self):
+        proxy = self._make_proxy(port='/dev/ttyUSB0', name='Console A')
+        wrapper = make_wrapper(serial_proxies=[proxy])
+        client = MockClient(path='/api/terminal-targets')
+        wrapper._handle_request(client)
+        self.assertEqual(client.respond_status, 200)
+        self.assertEqual(client.responded, [{
+            'endpoint': '__terminal-port-0',
+            'label': 'Console A',
+            'kind': 'port',
+            'port_index': 0,
+            'connected': False,
+            'ws_path': '/ws/__terminal-port-0',
+        }])
+
+    def test_pool_assignment_target_listed(self):
+        proxy = self._make_proxy(port='/dev/serial/by-id/usb-a', connected=True)
+        pool_manager = Mock()
+        pool_manager.terminal_targets.return_value = [{
+            'pool_index': 0,
+            'assignment_index': 1,
+            'identity': '/dev/serial/by-id/usb-a',
+            'name': 'Device A',
+            'pool_name': 'USB pool',
+            'port': 11000,
+            'proxy': proxy,
+        }]
+        wrapper = make_wrapper(pool_manager=pool_manager)
+        client = MockClient(path='/api/terminal-targets')
+        wrapper._handle_request(client)
+        self.assertEqual(client.respond_status, 200)
+        self.assertEqual(client.responded, [{
+            'endpoint': '__terminal-pool-0-1',
+            'label': 'USB pool - Device A',
+            'kind': 'pool-assignment',
+            'pool_index': 0,
+            'assignment_index': 1,
+            'connected': True,
+            'ws_path': '/ws/__terminal-pool-0-1',
+        }])
+
+    def test_managed_terminal_endpoints_are_routable(self):
+        explicit_server = Mock()
+        explicit_server.protocol = 'WEBSOCKET'
+        explicit_server.endpoint = 'configured'
+        proxy = self._make_proxy(servers=[explicit_server])
+        wrapper = make_wrapper(serial_proxies=[proxy])
+        endpoints = wrapper._get_ws_endpoints()
+        self.assertIs(endpoints['configured'], explicit_server)
+        self.assertIn('__terminal-port-0', endpoints)
 
 
 class TestApiDisconnect(unittest.TestCase):
