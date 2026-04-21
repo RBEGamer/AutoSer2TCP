@@ -133,6 +133,10 @@ function renderSignals() {
   });
 }
 
+function writeNotice(text) {
+  term.writeln('[system] ' + text);
+}
+
 // --- Endpoint loading ---
 
 function loadEndpoints() {
@@ -175,22 +179,34 @@ function loadEndpoints() {
 function connect() {
   if (ws) return;
   const endpoint = $('endpoint-select').value;
-  if (!endpoint) return;
+  if (!endpoint) {
+    writeNotice('Select a serial port first');
+    return;
+  }
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
   let url = scheme + '//' + location.host + '/ws/' + endpoint;
   if (token) url += '?token=' + encodeURIComponent(token);
+  writeNotice('Connecting to ' + endpoint + '...');
   ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
     signals = {};
     renderSignals();
     updateStatus(true);
+    writeNotice('Connected to ' + endpoint);
+    term.focus();
   };
-  ws.onclose = () => {
+  ws.onerror = () => {
+    writeNotice('WebSocket error while connecting to ' + endpoint);
+  };
+  ws.onclose = ev => {
     ws = null;
     signals = {};
     renderSignals();
     updateStatus(false);
+    const reason = ev && ev.reason ? ' - ' + ev.reason : '';
+    const code = ev && ev.code ? ' (code ' + ev.code + ')' : '';
+    writeNotice('Disconnected from ' + endpoint + code + reason);
   };
   ws.onmessage = ev => {
     if (typeof ev.data === 'string') {
